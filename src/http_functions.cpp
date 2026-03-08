@@ -32,15 +32,8 @@ static RateLimiterRegistry &GetRateLimiterRegistry() {
 	return registry;
 }
 
-// Stashed database handle from extension init, used to create connections for reading http_config
-static duckdb_database g_database = nullptr;
-
-void SetDatabase(duckdb_database db) {
-	g_database = db;
-}
-
 // ---------------------------------------------------------------------------
-// Helpers: extract MAP parameters, read config variable
+// Helpers
 // ---------------------------------------------------------------------------
 
 //! Extract key-value pairs from a MAP(VARCHAR, VARCHAR) duckdb_value.
@@ -70,55 +63,6 @@ static std::vector<std::pair<std::string, std::string>> ExtractMapParam(duckdb_v
 	return result;
 }
 
-//! Read the http_config variable by opening a temporary connection.
-//! Uses the chunk-based API (stable) rather than deprecated row-based accessors.
-static std::vector<std::pair<std::string, std::string>> ReadHttpConfigVariable(duckdb_database db) {
-	std::vector<std::pair<std::string, std::string>> entries;
-	if (!db) {
-		return entries;
-	}
-
-	duckdb_connection conn;
-	if (duckdb_connect(db, &conn) == DuckDBError) {
-		return entries;
-	}
-
-	duckdb_result result;
-	// Try to read the variable; it may not be set
-	auto state = duckdb_query(conn, "SELECT key, value FROM (SELECT unnest(map_keys(getvariable('http_config'))) AS key, "
-	                                "unnest(map_values(getvariable('http_config'))) AS value)", &result);
-	if (state == DuckDBError) {
-		duckdb_destroy_result(&result);
-		duckdb_disconnect(&conn);
-		return entries;
-	}
-
-	// Fetch chunks until exhausted
-	while (true) {
-		duckdb_data_chunk chunk = duckdb_fetch_chunk(result);
-		if (!chunk) {
-			break;
-		}
-		idx_t chunk_size = duckdb_data_chunk_get_size(chunk);
-		duckdb_vector key_vec = duckdb_data_chunk_get_vector(chunk, 0);
-		duckdb_vector val_vec = duckdb_data_chunk_get_vector(chunk, 1);
-		auto *key_data = (duckdb_string_t *)duckdb_vector_get_data(key_vec);
-		auto *val_data = (duckdb_string_t *)duckdb_vector_get_data(val_vec);
-
-		for (idx_t i = 0; i < chunk_size; i++) {
-			auto key_str = duckdb_string_t_data(&key_data[i]);
-			auto key_len = duckdb_string_t_length(key_data[i]);
-			auto val_str = duckdb_string_t_data(&val_data[i]);
-			auto val_len = duckdb_string_t_length(val_data[i]);
-			entries.emplace_back(std::string(key_str, key_len), std::string(val_str, val_len));
-		}
-		duckdb_destroy_data_chunk(&chunk);
-	}
-	duckdb_destroy_result(&result);
-	duckdb_disconnect(&conn);
-	return entries;
-}
-
 //! Extract hostname from a URL (for rate limiter keying and session pooling).
 static std::string ExtractHost(const std::string &url) {
 	auto pos = url.find("://");
@@ -143,19 +87,6 @@ static std::string HeadersToJson(const cpr::Header &headers) {
 }
 
 // ---------------------------------------------------------------------------
-// Extra info: stashed at registration time, available in all callbacks
-// ---------------------------------------------------------------------------
-
-struct HttpExtraInfo {
-	duckdb_database database;
-	std::string method;
-};
-
-static void DestroyExtraInfo(void *data) {
-	delete static_cast<HttpExtraInfo *>(data);
-}
-
-// ---------------------------------------------------------------------------
 // Bind data: holds parsed parameters for one table function invocation
 // ---------------------------------------------------------------------------
 
@@ -166,8 +97,10 @@ struct HttpBindData {
 	std::vector<std::pair<std::string, std::string>> params; // GET query params
 	std::string body;
 	std::string content_type;
-	int timeout_override = -1; // -1 means use config
+	int timeout_override = -1;    // -1 means use config
 	int verify_ssl_override = -1; // -1 means use config, 0 = false, 1 = true
+	// Config entries from the SQL macro layer (read from getvariable in caller's context)
+	std::vector<std::pair<std::string, std::string>> config_entries;
 };
 
 static void DestroyBindData(void *data) {
@@ -204,17 +137,9 @@ struct HttpResult {
 	int redirect_count = 0;
 };
 
-static HttpResult ExecuteRequest(const HttpBindData &bind_data, duckdb_database db) {
-	// Resolve config — try reading from http_config variable, fall back to defaults
-	HttpConfig config;
-	if (db) {
-		try {
-			auto config_entries = ReadHttpConfigVariable(db);
-			config = ResolveConfig(bind_data.url, config_entries);
-		} catch (...) {
-			// Config reading failed — use defaults
-		}
-	}
+static HttpResult ExecuteRequest(const HttpBindData &bind_data) {
+	// Resolve config from entries passed in by the SQL macro layer
+	HttpConfig config = ResolveConfig(bind_data.url, bind_data.config_entries);
 
 	// Apply per-call timeout override
 	int timeout = (bind_data.timeout_override >= 0) ? bind_data.timeout_override : config.timeout;
@@ -240,7 +165,7 @@ static HttpResult ExecuteRequest(const HttpBindData &bind_data, duckdb_database 
 		cpr_headers[k] = v;
 	}
 
-	// Apply auth from config
+	// Apply auth from config (only if not already set by the caller)
 	if (config.auth_type == "negotiate" && cpr_headers.find("Authorization") == cpr_headers.end()) {
 		try {
 			auto neg_result = GenerateNegotiateToken(bind_data.url);
@@ -343,15 +268,26 @@ static HttpResult ExecuteRequest(const HttpBindData &bind_data, duckdb_database 
 // Table function callbacks
 // ---------------------------------------------------------------------------
 
-//! Shared bind for all HTTP methods. Method is stored in extra_info.
-static void HttpBind(duckdb_bind_info info) {
+//! Bind for the unified _http_raw table function.
+//! Positional: method (VARCHAR), url (VARCHAR)
+//! Named: headers, params, body, content_type, timeout, verify_ssl, _config
+static void HttpRawBind(duckdb_bind_info info) {
 	auto *bind_data = new HttpBindData();
-	// Get the method and database from extra_info
-	auto *extra = static_cast<HttpExtraInfo *>(duckdb_bind_get_extra_info(info));
-	bind_data->method = extra->method;
 
-	// First positional parameter is always the URL
-	duckdb_value url_val = duckdb_bind_get_parameter(info, 0);
+	// Positional param 0: method
+	duckdb_value method_val = duckdb_bind_get_parameter(info, 0);
+	char *method_str = duckdb_get_varchar(method_val);
+	if (method_str) {
+		bind_data->method = method_str;
+		for (auto &c : bind_data->method) {
+			c = toupper(c);
+		}
+		duckdb_free(method_str);
+	}
+	duckdb_destroy_value(&method_val);
+
+	// Positional param 1: url
+	duckdb_value url_val = duckdb_bind_get_parameter(info, 1);
 	char *url_str = duckdb_get_varchar(url_val);
 	if (url_str) {
 		bind_data->url = url_str;
@@ -359,71 +295,81 @@ static void HttpBind(duckdb_bind_info info) {
 	}
 	duckdb_destroy_value(&url_val);
 
+	if (bind_data->method.empty()) {
+		duckdb_bind_set_error(info, "method parameter is required");
+		delete bind_data;
+		return;
+	}
 	if (bind_data->url.empty()) {
 		duckdb_bind_set_error(info, "URL parameter is required");
 		delete bind_data;
 		return;
 	}
 
-	// For http_do, the first param is method, second is URL
-	if (extra->method == "DO") {
-		bind_data->method = bind_data->url; // first param was actually the method
-		// Convert to uppercase
-		for (auto &c : bind_data->method) {
-			c = toupper(c);
-		}
-		duckdb_value url_val2 = duckdb_bind_get_parameter(info, 1);
-		char *url_str2 = duckdb_get_varchar(url_val2);
-		if (url_str2) {
-			bind_data->url = url_str2;
-			duckdb_free(url_str2);
-		}
-		duckdb_destroy_value(&url_val2);
-	}
-
-	// Named parameters
+	// Named parameters (all may be NULL when passed from macros with default := NULL)
 	duckdb_value headers_val = duckdb_bind_get_named_parameter(info, "headers");
 	if (headers_val) {
-		bind_data->headers = ExtractMapParam(headers_val);
+		if (!duckdb_is_null_value(headers_val)) {
+			bind_data->headers = ExtractMapParam(headers_val);
+		}
 		duckdb_destroy_value(&headers_val);
 	}
 
 	duckdb_value params_val = duckdb_bind_get_named_parameter(info, "params");
 	if (params_val) {
-		bind_data->params = ExtractMapParam(params_val);
+		if (!duckdb_is_null_value(params_val)) {
+			bind_data->params = ExtractMapParam(params_val);
+		}
 		duckdb_destroy_value(&params_val);
 	}
 
 	duckdb_value body_val = duckdb_bind_get_named_parameter(info, "body");
 	if (body_val) {
-		char *body_str = duckdb_get_varchar(body_val);
-		if (body_str) {
-			bind_data->body = body_str;
-			duckdb_free(body_str);
+		if (!duckdb_is_null_value(body_val)) {
+			char *body_str = duckdb_get_varchar(body_val);
+			if (body_str) {
+				bind_data->body = body_str;
+				duckdb_free(body_str);
+			}
 		}
 		duckdb_destroy_value(&body_val);
 	}
 
 	duckdb_value ct_val = duckdb_bind_get_named_parameter(info, "content_type");
 	if (ct_val) {
-		char *ct_str = duckdb_get_varchar(ct_val);
-		if (ct_str) {
-			bind_data->content_type = ct_str;
-			duckdb_free(ct_str);
+		if (!duckdb_is_null_value(ct_val)) {
+			char *ct_str = duckdb_get_varchar(ct_val);
+			if (ct_str) {
+				bind_data->content_type = ct_str;
+				duckdb_free(ct_str);
+			}
 		}
 		duckdb_destroy_value(&ct_val);
 	}
 
 	duckdb_value timeout_val = duckdb_bind_get_named_parameter(info, "timeout");
 	if (timeout_val) {
-		bind_data->timeout_override = static_cast<int>(duckdb_get_int64(timeout_val));
+		if (!duckdb_is_null_value(timeout_val)) {
+			bind_data->timeout_override = static_cast<int>(duckdb_get_int64(timeout_val));
+		}
 		duckdb_destroy_value(&timeout_val);
 	}
 
 	duckdb_value verify_ssl_val = duckdb_bind_get_named_parameter(info, "verify_ssl");
 	if (verify_ssl_val) {
-		bind_data->verify_ssl_override = duckdb_get_bool(verify_ssl_val) ? 1 : 0;
+		if (!duckdb_is_null_value(verify_ssl_val)) {
+			bind_data->verify_ssl_override = duckdb_get_bool(verify_ssl_val) ? 1 : 0;
+		}
 		duckdb_destroy_value(&verify_ssl_val);
+	}
+
+	// _config: MAP(VARCHAR, VARCHAR) passed in by the SQL macro layer
+	duckdb_value config_val = duckdb_bind_get_named_parameter(info, "_config");
+	if (config_val) {
+		if (!duckdb_is_null_value(config_val)) {
+			bind_data->config_entries = ExtractMapParam(config_val);
+		}
+		duckdb_destroy_value(&config_val);
 	}
 
 	// Define output columns
@@ -466,11 +412,9 @@ static void HttpExecute(duckdb_function_info info, duckdb_data_chunk output) {
 		return;
 	}
 
-	auto *extra = static_cast<HttpExtraInfo *>(duckdb_function_get_extra_info(info));
-
 	HttpResult result;
 	try {
-		result = ExecuteRequest(*bind_data, extra ? extra->database : nullptr);
+		result = ExecuteRequest(*bind_data);
 	} catch (const std::exception &e) {
 		duckdb_function_set_error(info, e.what());
 		return;
@@ -478,7 +422,6 @@ static void HttpExecute(duckdb_function_info info, duckdb_data_chunk output) {
 
 	duckdb_data_chunk_set_size(output, 1);
 
-	// Helper to set a varchar column
 	auto set_varchar = [&](idx_t col, const std::string &val) {
 		duckdb_vector vec = duckdb_data_chunk_get_vector(output, col);
 		duckdb_vector_assign_string_element_len(vec, 0, val.c_str(), val.length());
@@ -510,49 +453,37 @@ static void HttpExecute(duckdb_function_info info, duckdb_data_chunk output) {
 }
 
 // ---------------------------------------------------------------------------
-// Registration
+// Raw table function registration: _http_raw(method, url, ...)
 // ---------------------------------------------------------------------------
 
-//! Register a table function for a specific HTTP method.
-//! For http_do, method should be "DO" and an extra positional param is added.
-static void RegisterHttpMethod(duckdb_connection connection, const char *name, const char *method, bool has_body) {
+static void RegisterHttpRawTableFunction(duckdb_connection connection) {
 	duckdb_table_function function = duckdb_create_table_function();
-	duckdb_table_function_set_name(function, name);
+	duckdb_table_function_set_name(function, "_http_raw");
 
 	duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
 	duckdb_logical_type int_type = duckdb_create_logical_type(DUCKDB_TYPE_INTEGER);
+	duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
 	duckdb_logical_type map_type = duckdb_create_map_type(varchar_type, varchar_type);
 
-	// Positional params
-	if (std::string(method) == "DO") {
-		duckdb_table_function_add_parameter(function, varchar_type); // method
-	}
+	// Positional: method, url
+	duckdb_table_function_add_parameter(function, varchar_type); // method
 	duckdb_table_function_add_parameter(function, varchar_type); // url
 
-	// Named params — all optional
+	// Named parameters
 	duckdb_table_function_add_named_parameter(function, "headers", map_type);
 	duckdb_table_function_add_named_parameter(function, "params", map_type);
-	if (has_body || std::string(method) == "DO") {
-		duckdb_table_function_add_named_parameter(function, "body", varchar_type);
-		duckdb_table_function_add_named_parameter(function, "content_type", varchar_type);
-	}
+	duckdb_table_function_add_named_parameter(function, "body", varchar_type);
+	duckdb_table_function_add_named_parameter(function, "content_type", varchar_type);
 	duckdb_table_function_add_named_parameter(function, "timeout", int_type);
-
-	duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
 	duckdb_table_function_add_named_parameter(function, "verify_ssl", bool_type);
-	duckdb_destroy_logical_type(&bool_type);
+	duckdb_table_function_add_named_parameter(function, "_config", map_type);
 
 	duckdb_destroy_logical_type(&varchar_type);
 	duckdb_destroy_logical_type(&int_type);
+	duckdb_destroy_logical_type(&bool_type);
 	duckdb_destroy_logical_type(&map_type);
 
-	// Store method name + database handle in extra_info
-	auto *extra = new HttpExtraInfo();
-	extra->method = method;
-	extra->database = g_database;
-	duckdb_table_function_set_extra_info(function, extra, DestroyExtraInfo);
-
-	duckdb_table_function_set_bind(function, HttpBind);
+	duckdb_table_function_set_bind(function, HttpRawBind);
 	duckdb_table_function_set_init(function, HttpInit);
 	duckdb_table_function_set_function(function, HttpExecute);
 
@@ -561,10 +492,9 @@ static void RegisterHttpMethod(duckdb_connection connection, const char *name, c
 }
 
 // ---------------------------------------------------------------------------
-// Scalar function: http_request(method, url, headers_json, body, content_type)
+// Scalar function: _http_raw_request(method, url, headers_json, body,
+//                                    content_type, config_json)
 // Returns a JSON string with the full request/response envelope.
-// All parameters are VARCHAR. headers_json is a JSON object string.
-// This variant works in any expression context including JOINs.
 // ---------------------------------------------------------------------------
 
 //! Parse a JSON object string into key-value pairs. Returns empty on null/invalid.
@@ -597,7 +527,7 @@ static std::string ReadVarchar(duckdb_vector vec, uint64_t *validity, idx_t row)
 	return std::string(str, len);
 }
 
-static void HttpRequestScalarFunc(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
+static void HttpRawRequestScalarFunc(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
 	idx_t input_size = duckdb_data_chunk_get_size(input);
 
 	duckdb_vector method_vec = duckdb_data_chunk_get_vector(input, 0);
@@ -605,12 +535,14 @@ static void HttpRequestScalarFunc(duckdb_function_info info, duckdb_data_chunk i
 	duckdb_vector headers_vec = duckdb_data_chunk_get_vector(input, 2);
 	duckdb_vector body_vec = duckdb_data_chunk_get_vector(input, 3);
 	duckdb_vector ct_vec = duckdb_data_chunk_get_vector(input, 4);
+	duckdb_vector config_vec = duckdb_data_chunk_get_vector(input, 5);
 
 	auto *method_validity = duckdb_vector_get_validity(method_vec);
 	auto *url_validity = duckdb_vector_get_validity(url_vec);
 	auto *headers_validity = duckdb_vector_get_validity(headers_vec);
 	auto *body_validity = duckdb_vector_get_validity(body_vec);
 	auto *ct_validity = duckdb_vector_get_validity(ct_vec);
+	auto *config_validity = duckdb_vector_get_validity(config_vec);
 
 	for (idx_t row = 0; row < input_size; row++) {
 		auto method = ReadVarchar(method_vec, method_validity, row);
@@ -621,15 +553,14 @@ static void HttpRequestScalarFunc(duckdb_function_info info, duckdb_data_chunk i
 			return;
 		}
 
-		// Uppercase the method
 		for (auto &c : method) {
 			c = toupper(c);
 		}
 
-		// Parse optional JSON headers
 		auto headers_str = ReadVarchar(headers_vec, headers_validity, row);
 		auto body = ReadVarchar(body_vec, body_validity, row);
 		auto content_type = ReadVarchar(ct_vec, ct_validity, row);
+		auto config_json = ReadVarchar(config_vec, config_validity, row);
 
 		HttpBindData bind_data;
 		bind_data.method = method;
@@ -637,16 +568,16 @@ static void HttpRequestScalarFunc(duckdb_function_info info, duckdb_data_chunk i
 		bind_data.headers = ParseJsonObject(headers_str.c_str(), headers_str.size());
 		bind_data.body = body;
 		bind_data.content_type = content_type;
+		bind_data.config_entries = ParseJsonObject(config_json.c_str(), config_json.size());
 
 		HttpResult result;
 		try {
-			result = ExecuteRequest(bind_data, g_database);
+			result = ExecuteRequest(bind_data);
 		} catch (const std::exception &e) {
 			duckdb_scalar_function_set_error(info, e.what());
 			return;
 		}
 
-		// Build JSON response envelope
 		nlohmann::json j;
 		j["request_url"] = result.request_url;
 		j["request_method"] = result.request_method;
@@ -665,23 +596,24 @@ static void HttpRequestScalarFunc(duckdb_function_info info, duckdb_data_chunk i
 	}
 }
 
-static void RegisterHttpRequestScalar(duckdb_connection connection) {
+static void RegisterHttpRawRequestScalar(duckdb_connection connection) {
 	duckdb_scalar_function function = duckdb_create_scalar_function();
-	duckdb_scalar_function_set_name(function, "http_request");
+	duckdb_scalar_function_set_name(function, "_http_raw_request");
 
 	duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
 
-	// http_request(method, url, headers_json, body, content_type)
-	duckdb_scalar_function_add_parameter(function, varchar_type);  // method
-	duckdb_scalar_function_add_parameter(function, varchar_type);  // url
-	duckdb_scalar_function_add_parameter(function, varchar_type);  // headers (JSON string)
-	duckdb_scalar_function_add_parameter(function, varchar_type);  // body
-	duckdb_scalar_function_add_parameter(function, varchar_type);  // content_type
+	// _http_raw_request(method, url, headers_json, body, content_type, config_json)
+	duckdb_scalar_function_add_parameter(function, varchar_type); // method
+	duckdb_scalar_function_add_parameter(function, varchar_type); // url
+	duckdb_scalar_function_add_parameter(function, varchar_type); // headers (JSON string)
+	duckdb_scalar_function_add_parameter(function, varchar_type); // body
+	duckdb_scalar_function_add_parameter(function, varchar_type); // content_type
+	duckdb_scalar_function_add_parameter(function, varchar_type); // config (JSON string)
 
 	duckdb_scalar_function_set_return_type(function, varchar_type);
 	duckdb_destroy_logical_type(&varchar_type);
 
-	duckdb_scalar_function_set_function(function, HttpRequestScalarFunc);
+	duckdb_scalar_function_set_function(function, HttpRawRequestScalarFunc);
 	duckdb_scalar_function_set_special_handling(function);
 
 	duckdb_register_scalar_function(connection, function);
@@ -689,22 +621,109 @@ static void RegisterHttpRequestScalar(duckdb_connection connection) {
 }
 
 // ---------------------------------------------------------------------------
-// Register everything
+// SQL macro registration: user-facing wrappers that inject config
+// ---------------------------------------------------------------------------
+
+//! Helper: try to register a SQL macro via duckdb_query. Ignores errors on
+//! individual macros so the extension still loads if a macro fails.
+static void TryRegisterMacro(duckdb_connection connection, const char *sql) {
+	duckdb_result result;
+	duckdb_query(connection, sql, &result);
+	duckdb_destroy_result(&result);
+}
+
+void RegisterHttpMacros(duckdb_connection connection) {
+	// Helper macro to safely read the http_config variable.
+	// Returns an empty MAP if the variable is not set.
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO _http_config() AS "
+		"IFNULL(TRY_CAST(getvariable('http_config') AS MAP(VARCHAR, VARCHAR)), MAP {})");
+
+	// Table function macros: http_get, http_post, etc.
+	// These read http_config from the caller's connection and pass it to _http_raw.
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_get(url, headers := NULL::MAP(VARCHAR, VARCHAR), "
+		"params := NULL::MAP(VARCHAR, VARCHAR), timeout := NULL::INTEGER, "
+		"verify_ssl := NULL::BOOLEAN) AS TABLE "
+		"SELECT * FROM _http_raw('GET', url, headers := headers, params := params, "
+		"timeout := timeout, verify_ssl := verify_ssl, _config := _http_config())");
+
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_post(url, headers := NULL::MAP(VARCHAR, VARCHAR), "
+		"params := NULL::MAP(VARCHAR, VARCHAR), body := NULL::VARCHAR, "
+		"content_type := NULL::VARCHAR, timeout := NULL::INTEGER, "
+		"verify_ssl := NULL::BOOLEAN) AS TABLE "
+		"SELECT * FROM _http_raw('POST', url, headers := headers, params := params, "
+		"body := body, content_type := content_type, "
+		"timeout := timeout, verify_ssl := verify_ssl, _config := _http_config())");
+
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_put(url, headers := NULL::MAP(VARCHAR, VARCHAR), "
+		"params := NULL::MAP(VARCHAR, VARCHAR), body := NULL::VARCHAR, "
+		"content_type := NULL::VARCHAR, timeout := NULL::INTEGER, "
+		"verify_ssl := NULL::BOOLEAN) AS TABLE "
+		"SELECT * FROM _http_raw('PUT', url, headers := headers, params := params, "
+		"body := body, content_type := content_type, "
+		"timeout := timeout, verify_ssl := verify_ssl, _config := _http_config())");
+
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_delete(url, headers := NULL::MAP(VARCHAR, VARCHAR), "
+		"params := NULL::MAP(VARCHAR, VARCHAR), timeout := NULL::INTEGER, "
+		"verify_ssl := NULL::BOOLEAN) AS TABLE "
+		"SELECT * FROM _http_raw('DELETE', url, headers := headers, params := params, "
+		"timeout := timeout, verify_ssl := verify_ssl, _config := _http_config())");
+
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_patch(url, headers := NULL::MAP(VARCHAR, VARCHAR), "
+		"params := NULL::MAP(VARCHAR, VARCHAR), body := NULL::VARCHAR, "
+		"content_type := NULL::VARCHAR, timeout := NULL::INTEGER, "
+		"verify_ssl := NULL::BOOLEAN) AS TABLE "
+		"SELECT * FROM _http_raw('PATCH', url, headers := headers, params := params, "
+		"body := body, content_type := content_type, "
+		"timeout := timeout, verify_ssl := verify_ssl, _config := _http_config())");
+
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_head(url, headers := NULL::MAP(VARCHAR, VARCHAR), "
+		"params := NULL::MAP(VARCHAR, VARCHAR), timeout := NULL::INTEGER, "
+		"verify_ssl := NULL::BOOLEAN) AS TABLE "
+		"SELECT * FROM _http_raw('HEAD', url, headers := headers, params := params, "
+		"timeout := timeout, verify_ssl := verify_ssl, _config := _http_config())");
+
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_options(url, headers := NULL::MAP(VARCHAR, VARCHAR), "
+		"params := NULL::MAP(VARCHAR, VARCHAR), timeout := NULL::INTEGER, "
+		"verify_ssl := NULL::BOOLEAN) AS TABLE "
+		"SELECT * FROM _http_raw('OPTIONS', url, headers := headers, params := params, "
+		"timeout := timeout, verify_ssl := verify_ssl, _config := _http_config())");
+
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_do(method, url, headers := NULL::MAP(VARCHAR, VARCHAR), "
+		"params := NULL::MAP(VARCHAR, VARCHAR), body := NULL::VARCHAR, "
+		"content_type := NULL::VARCHAR, timeout := NULL::INTEGER, "
+		"verify_ssl := NULL::BOOLEAN) AS TABLE "
+		"SELECT * FROM _http_raw(method, url, headers := headers, params := params, "
+		"body := body, content_type := content_type, "
+		"timeout := timeout, verify_ssl := verify_ssl, _config := _http_config())");
+
+	// Scalar macro: http_request(method, url, headers_json, body, content_type)
+	// Wraps _http_raw_request, injecting config as the 6th parameter.
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_request(method, url, headers_json, body, content_type) AS "
+		"_http_raw_request(method, url, headers_json, body, content_type, "
+		"CAST(_http_config() AS JSON))");
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point
 // ---------------------------------------------------------------------------
 
 void RegisterHttpFunctions(duckdb_connection connection) {
-	// Table functions (for interactive/literal use)
-	RegisterHttpMethod(connection, "http_get", "GET", false);
-	RegisterHttpMethod(connection, "http_post", "POST", true);
-	RegisterHttpMethod(connection, "http_put", "PUT", true);
-	RegisterHttpMethod(connection, "http_delete", "DELETE", false);
-	RegisterHttpMethod(connection, "http_patch", "PATCH", true);
-	RegisterHttpMethod(connection, "http_head", "HEAD", false);
-	RegisterHttpMethod(connection, "http_options", "OPTIONS", false);
-	RegisterHttpMethod(connection, "http_do", "DO", true);
+	// Raw C functions (prefixed with _ — not intended for direct use)
+	RegisterHttpRawTableFunction(connection);
+	RegisterHttpRawRequestScalar(connection);
 
-	// Scalar function (for data-driven/JOIN use)
-	RegisterHttpRequestScalar(connection);
+	// SQL macros: user-facing wrappers that inject config
+	RegisterHttpMacros(connection);
 }
 
 } // namespace http_client
