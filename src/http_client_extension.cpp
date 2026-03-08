@@ -16,19 +16,29 @@ static void NegotiateAuthHeaderFunc(duckdb_function_info info, duckdb_data_chunk
 	idx_t input_size = duckdb_data_chunk_get_size(input);
 	duckdb_vector url_vec = duckdb_data_chunk_get_vector(input, 0);
 
+	auto url_data = (duckdb_string_t *)duckdb_vector_get_data(url_vec);
+
 	for (idx_t row = 0; row < input_size; row++) {
-		auto url_str = duckdb_string_t_data(((duckdb_string_t *)duckdb_vector_get_data(url_vec)) + row);
-		auto url_len = duckdb_string_t_length(((duckdb_string_t *)duckdb_vector_get_data(url_vec)) + row);
+		auto url_str = duckdb_string_t_data(&url_data[row]);
+		auto url_len = duckdb_string_t_length(url_data[row]);
+
+		std::string url(url_str, url_len);
+		std::string error_msg;
+		std::string token;
 
 		try {
-			std::string url(url_str, url_len);
-			std::string token = http_client::GenerateNegotiateToken(url);
-			std::string header = "Negotiate " + token;
-			duckdb_vector_assign_string_element_len(output, row, header.c_str(), header.length());
+			token = http_client::GenerateNegotiateToken(url);
 		} catch (const std::exception &e) {
-			duckdb_function_set_error(info, e.what());
+			error_msg = e.what();
+		}
+
+		if (!error_msg.empty()) {
+			duckdb_scalar_function_set_error(info, error_msg.c_str());
 			return;
 		}
+
+		std::string header = "Negotiate " + token;
+		duckdb_vector_assign_string_element_len(output, row, header.c_str(), header.length());
 	}
 }
 

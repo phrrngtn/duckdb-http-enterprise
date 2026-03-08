@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -s -arch arm64 -dynamiclib -Wl,-headerpad_max_install_names -o libhttp_client.dylib -install_name @rpath/libhttp_client.dylib CMakeFiles/http_client.dir/src/http_client_extension.cpp.o CMakeFiles/http_client.dir/src/negotiate_auth.cpp.o
