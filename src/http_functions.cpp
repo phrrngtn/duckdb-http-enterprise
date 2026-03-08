@@ -882,6 +882,52 @@ void RegisterHttpMacros(duckdb_connection connection) {
 		"content_type := NULL::VARCHAR) AS "
 		"to_json(_http_raw_request_volatile(method, url, headers, body, content_type, "
 		"CAST(_http_config() AS JSON)))");
+
+	// --- Configuration helper macros ---
+	// These provide safe, merge-based updates to individual scopes within
+	// http_config.  They return the new MAP value for use with SET VARIABLE.
+
+	// http_config_set(scope, config_json) — merge a scope's JSON config
+	// into the existing http_config, preserving all other scopes.
+	// Cast config_json to VARCHAR so json_object() return values (JSON type)
+	// are compatible with the MAP(VARCHAR, VARCHAR) storage.
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_config_set(scope, config_json) AS "
+		"map_concat("
+		"  _http_config(),"
+		"  MAP([scope], [CAST(config_json AS VARCHAR)])"
+		")");
+
+	// http_config_remove(scope) — remove a scope from http_config.
+	// Returns the new MAP with the scope deleted.
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_config_remove(scope) AS "
+		"map_from_entries(["
+		"  entry FOR entry IN map_entries(_http_config()) "
+		"  IF entry.key != scope"
+		"])");
+
+	// http_config_get(scope) — read a single scope's JSON config.
+	// Returns the JSON string, or NULL if the scope is not configured.
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_config_get(scope) AS "
+		"_http_config()[scope]");
+
+	// http_config_set_bearer(scope, token, expires_at) — convenience for
+	// the common pattern of setting a bearer token with optional expiry.
+	// Uses json_object() for safe JSON construction (no string escaping issues).
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_config_set_bearer("
+		"scope, token, expires_at := 0) AS "
+		"http_config_set(scope, CASE "
+		"  WHEN expires_at > 0 THEN json_object("
+		"    'auth_type', 'bearer', "
+		"    'bearer_token', token, "
+		"    'bearer_token_expires_at', expires_at) "
+		"  ELSE json_object("
+		"    'auth_type', 'bearer', "
+		"    'bearer_token', token) "
+		"END)");
 }
 
 // ---------------------------------------------------------------------------

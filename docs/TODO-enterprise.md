@@ -25,9 +25,10 @@ counters they report, or you get infinite regress.
 Configuration would fit naturally into `http_config`:
 
 ```sql
-SET VARIABLE http_config = MAP {
-    'default': '{"telemetry_sink": "http://otel-collector:4318/v1/metrics"}'
-};
+SET VARIABLE http_config = http_config_set(
+    'default',
+    json_object('telemetry_sink', 'http://otel-collector:4318/v1/metrics')
+);
 ```
 
 Push triggers (in order of complexity):
@@ -101,35 +102,26 @@ The pattern is:
 3. Use that token for subsequent API calls
 4. Re-authenticate when the token expires
 
-Today this can be done manually in SQL:
-
-```python
-# Python hosting application refreshes the token and merges it into config
-token, expires_at = get_vendor_token()  # your multi-hop auth chain
-
-# Merge — preserves existing config for other scopes
-existing = con.execute("SELECT getvariable('http_config')").fetchone()[0] or {}
-existing['https://api.corp.com'] = json.dumps({
-    "auth_type": "bearer",
-    "bearer_token": token,
-    "bearer_token_expires_at": expires_at
-})
-con.execute("SET VARIABLE http_config = ?", [existing])
-```
-
-Or purely in SQL, using `map_concat` to merge without clobbering:
+Today this is handled via the `http_config_set_bearer` helper macro:
 
 ```sql
-SET VARIABLE http_config = map_concat(
-    IFNULL(TRY_CAST(getvariable('http_config') AS MAP(VARCHAR, VARCHAR)), MAP {}),
-    MAP {
-        'https://api.corp.com': '{"auth_type": "bearer", "bearer_token": "eyJ...", "bearer_token_expires_at": 1741564800}'
-    }
+SET VARIABLE http_config = http_config_set_bearer(
+    'https://api.corp.com/', 'eyJ...', expires_at := 1741564800
 );
 ```
 
-But this is tedious and doesn't handle expiry automatically. A better
-approach would be extension-level token caching:
+Or from a Python hosting application:
+
+```python
+token, expires_at = get_vendor_token()  # your multi-hop auth chain
+con.execute(
+    "SET VARIABLE http_config = http_config_set_bearer($1, $2, expires_at := $3)",
+    ['https://api.corp.com/', token, expires_at]
+)
+```
+
+The helpers handle merging safely, but the hosting application still owns the
+refresh chain. A better approach would be extension-level token caching:
 
 - A process-global token cache keyed by token endpoint URL
 - Each entry stores: token, expiry timestamp, the auth method used to obtain it
@@ -139,13 +131,12 @@ approach would be extension-level token caching:
   `token_expiry_field` (JSON path to extract expiry from the token response)
 
 ```sql
-SET VARIABLE http_config = MAP {
-    'https://api.corp.com': '{
-        "auth_type": "bearer",
-        "token_endpoint": "https://auth.corp.com/token",
-        "token_auth_type": "negotiate"
-    }'
-};
+SET VARIABLE http_config = http_config_set(
+    'https://api.corp.com/',
+    json_object('auth_type', 'bearer',
+                'token_endpoint', 'https://auth.corp.com/token',
+                'token_auth_type', 'negotiate')
+);
 -- Now requests to api.corp.com automatically obtain and refresh tokens
 ```
 
@@ -176,14 +167,13 @@ secret from Vault before making the HTTP request. The secret value populates
 the bearer token (or other auth fields).
 
 ```sql
-SET VARIABLE http_config = MAP {
-    'https://api.corp.com': '{
-        "auth_type": "bearer",
-        "vault_addr": "https://vault.corp.com",
-        "vault_secret_path": "secret/data/api-corp-com/token",
-        "vault_token_field": "access_token"
-    }'
-};
+SET VARIABLE http_config = http_config_set(
+    'https://api.corp.com/',
+    json_object('auth_type', 'bearer',
+                'vault_addr', 'https://vault.corp.com',
+                'vault_secret_path', 'secret/data/api-corp-com/token',
+                'vault_token_field', 'access_token')
+);
 ```
 
 The extension would `GET` the Vault secret endpoint (using its own HTTP

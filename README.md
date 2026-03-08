@@ -220,14 +220,54 @@ SELECT r.response_status_code
 FROM (SELECT http_get('https://api.example.com/v2/users') AS r);
 ```
 
+### Configuration helpers
+
+The extension provides helper macros for safely updating individual scopes
+without clobbering the rest of `http_config`.
+
+| Macro | Description |
+|-------|-------------|
+| `http_config_set(scope, config_json)` | Merge a scope's JSON config into the existing config, preserving all other scopes. Returns the new MAP. |
+| `http_config_set_bearer(scope, token, expires_at := 0)` | Convenience for setting a bearer token. Uses `json_object()` internally for safe JSON construction. |
+| `http_config_get(scope)` | Read a single scope's JSON config string (or NULL). |
+| `http_config_remove(scope)` | Remove a scope. Returns the new MAP. |
+
+```sql
+-- Set a scope's config (merges, doesn't clobber)
+SET VARIABLE http_config = http_config_set(
+    'https://secure-api.corp.com/',
+    json_object('client_cert', '/path/to/client.pem',
+                'client_key', '/path/to/client-key.pem',
+                'ca_bundle', '/path/to/ca-chain.pem')
+);
+
+-- Set a bearer token with expiry (shorthand)
+SET VARIABLE http_config = http_config_set_bearer(
+    'https://api.vendor.com/', 'eyJ...', expires_at := 1741564800
+);
+
+-- Refresh a token later — other scopes are preserved
+SET VARIABLE http_config = http_config_set_bearer(
+    'https://api.vendor.com/', 'eyJnew...', expires_at := 1741571400
+);
+
+-- Inspect what's configured for a scope
+SELECT http_config_get('https://api.vendor.com/');
+
+-- Remove a scope entirely
+SET VARIABLE http_config = http_config_remove('https://api.vendor.com/');
+```
+
 ### Mutual TLS (mTLS)
 
 To authenticate with a client certificate:
 
 ```sql
-SET VARIABLE http_config = MAP {
-    'https://secure-api.corp.com/': '{"client_cert": "/path/to/client.pem", "client_key": "/path/to/client-key.pem"}'
-};
+SET VARIABLE http_config = http_config_set(
+    'https://secure-api.corp.com/',
+    json_object('client_cert', '/path/to/client.pem',
+                'client_key', '/path/to/client-key.pem')
+);
 
 SELECT r.response_status_code
 FROM (SELECT http_get('https://secure-api.corp.com/endpoint') AS r);
@@ -236,9 +276,12 @@ FROM (SELECT http_get('https://secure-api.corp.com/endpoint') AS r);
 Combine with `ca_bundle` if the server uses a private CA:
 
 ```sql
-SET VARIABLE http_config = MAP {
-    'https://secure-api.corp.com/': '{"client_cert": "/path/to/client.pem", "client_key": "/path/to/client-key.pem", "ca_bundle": "/path/to/ca-chain.pem"}'
-};
+SET VARIABLE http_config = http_config_set(
+    'https://secure-api.corp.com/',
+    json_object('client_cert', '/path/to/client.pem',
+                'client_key', '/path/to/client-key.pem',
+                'ca_bundle', '/path/to/ca-chain.pem')
+);
 ```
 
 ### Bearer token with expiry
@@ -248,9 +291,9 @@ extension fails fast with a clear error rather than making a request that will
 be rejected:
 
 ```sql
-SET VARIABLE http_config = MAP {
-    'https://api.vendor.com/': '{"auth_type": "bearer", "bearer_token": "eyJ...", "bearer_token_expires_at": 1741564800}'
-};
+SET VARIABLE http_config = http_config_set_bearer(
+    'https://api.vendor.com/', 'eyJ...', expires_at := 1741564800
+);
 ```
 
 If the token has expired, the extension raises an error with ISO 8601
@@ -262,15 +305,12 @@ Bearer token for api.vendor.com expired at 2025-03-10T00:00:00Z (1741564800)
 Refresh the token via your application and update http_config.
 ```
 
-To update a single scope's token without clobbering other config, use
-`map_concat`:
+Refresh by calling `http_config_set_bearer` again — existing config for other
+scopes is preserved:
 
 ```sql
-SET VARIABLE http_config = map_concat(
-    IFNULL(TRY_CAST(getvariable('http_config') AS MAP(VARCHAR, VARCHAR)), MAP {}),
-    MAP {
-        'https://api.vendor.com/': '{"auth_type": "bearer", "bearer_token": "eyJnew...", "bearer_token_expires_at": 1741571400}'
-    }
+SET VARIABLE http_config = http_config_set_bearer(
+    'https://api.vendor.com/', 'eyJnew...', expires_at := 1741571400
 );
 ```
 
@@ -488,8 +528,8 @@ extraction is working as expected.
 
 The extension checks `bearer_token_expires_at` before each request. If your
 token has expired, you'll see an error with both ISO 8601 and Unix timestamps.
-Refresh the token in your hosting application and update the config using
-`map_concat` (see [Bearer token with expiry](#bearer-token-with-expiry)).
+Refresh the token in your hosting application and call
+`http_config_set_bearer` (see [Bearer token with expiry](#bearer-token-with-expiry)).
 
 ### mTLS handshake failures
 
