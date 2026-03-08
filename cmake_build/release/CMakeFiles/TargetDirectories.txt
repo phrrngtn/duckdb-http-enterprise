@@ -1,3 +1,0 @@
-/Users/paulharrington/checkouts/duckdb-http-client/cmake_build/release/CMakeFiles/http_client.dir
-/Users/paulharrington/checkouts/duckdb-http-client/cmake_build/release/CMakeFiles/edit_cache.dir
-/Users/paulharrington/checkouts/duckdb-http-client/cmake_build/release/CMakeFiles/rebuild_cache.dir

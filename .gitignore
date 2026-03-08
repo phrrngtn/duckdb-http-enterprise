@@ -1,4 +1,6 @@
 build/
+cmake_build/
+configure/
 .env
 venv/
 __pycache__/
