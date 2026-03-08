@@ -41,7 +41,7 @@ total_requests = 0
 request_log = []  # list of {id, thread, arrived, departed, duration, concurrent_on_arrival}
 
 
-@app.route('/slow/<path:path>')
+@app.route('/slow/<path:path>', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
 def slow_endpoint(path):
     """Respond after a configurable delay. Default 0.5s, override with ?delay=N."""
     global active_connections, peak_connections, total_requests
@@ -96,7 +96,7 @@ def slow_endpoint(path):
     })
 
 
-@app.route('/fast')
+@app.route('/fast', methods=['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])
 def fast_endpoint():
     """Respond immediately. For measuring raw throughput."""
     global active_connections, peak_connections, total_requests

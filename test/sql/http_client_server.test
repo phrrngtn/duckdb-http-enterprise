@@ -1,0 +1,79 @@
+# name: test/sql/http_client_server.test
+# description: Test http_client extension against local Flask server (localhost:8444)
+# group: [http_client]
+#
+# Requires: python test/flask_concurrency_server.py running on localhost:8444
+
+require http_client
+
+# ---------------------------------------------------------------------------
+# http_get: basic GET
+# ---------------------------------------------------------------------------
+
+query I
+SELECT r.response_status_code
+FROM (SELECT http_get('http://localhost:8444/fast') AS r);
+----
+200
+
+# GET with custom headers
+query I
+SELECT r.response_status_code
+FROM (SELECT http_get('http://localhost:8444/fast', headers := MAP {'X-Test': 'ci'}) AS r);
+----
+200
+
+# Response headers are MAP(VARCHAR, VARCHAR)
+query I
+SELECT r.response_headers['Content-Type']
+FROM (SELECT http_get('http://localhost:8444/fast') AS r);
+----
+application/json
+
+# ---------------------------------------------------------------------------
+# http_post: volatile POST (use /slow which accepts any method)
+# ---------------------------------------------------------------------------
+
+query I
+SELECT r.response_status_code
+FROM (SELECT http_post('http://localhost:8444/slow/post-test?delay=0',
+    body := '{"k": "v"}', content_type := 'application/json') AS r);
+----
+200
+
+# ---------------------------------------------------------------------------
+# http_request: generic scalar
+# ---------------------------------------------------------------------------
+
+query I
+SELECT r.response_status_code
+FROM (SELECT http_request('GET', 'http://localhost:8444/fast') AS r);
+----
+200
+
+# ---------------------------------------------------------------------------
+# Data-driven batch: multiple URLs
+# ---------------------------------------------------------------------------
+
+query II
+SELECT url, r.response_status_code AS status
+FROM (
+    SELECT url, http_get(url) AS r
+    FROM (VALUES
+        ('http://localhost:8444/fast'),
+        ('http://localhost:8444/health')
+    ) AS t(url)
+)
+ORDER BY url;
+----
+http://localhost:8444/fast	200
+http://localhost:8444/health	200
+
+# ---------------------------------------------------------------------------
+# Rate limit stats: verify counters populated after requests
+# ---------------------------------------------------------------------------
+
+query I
+SELECT count(*) > 0 FROM http_rate_limit_stats();
+----
+true

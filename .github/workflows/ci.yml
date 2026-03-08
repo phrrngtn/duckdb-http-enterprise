@@ -28,7 +28,7 @@ jobs:
       - name: Build extension
         run: make release
 
-      - name: Run sqllogictest (local, no network)
+      - name: Run sqllogictest (offline — no server needed)
         run: |
           uv run python -m duckdb_sqllogictest \
             --test-dir test/sql \
@@ -43,5 +43,12 @@ jobs:
             sleep 0.5
           done
 
-      - name: Run integration tests
+      - name: Run sqllogictest (server tests)
+        run: |
+          uv run python -m duckdb_sqllogictest \
+            --test-dir test/sql \
+            --external-extension build/release/http_client.duckdb_extension \
+            --file-path test/sql/http_client_server.test
+
+      - name: Run pytest (parallel execution verification)
         run: uv run pytest test/test_integration.py -v
