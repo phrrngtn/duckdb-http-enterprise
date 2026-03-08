@@ -102,6 +102,7 @@ static void RegisterScalarVarcharFunction(duckdb_connection connection, const ch
 
 DUCKDB_EXTENSION_ENTRYPOINT(duckdb_connection connection, duckdb_extension_info info,
                             struct duckdb_extension_access *access) {
+	http_client::SetDatabase(*access->get_database(info));
 	RegisterScalarVarcharFunction(connection, "negotiate_auth_header", NegotiateAuthTokenFunc);
 	RegisterScalarVarcharFunction(connection, "negotiate_auth_header_json", NegotiateAuthTokenJsonFunc);
 	http_client::RegisterHttpFunctions(connection);

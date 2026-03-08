@@ -32,6 +32,13 @@ static RateLimiterRegistry &GetRateLimiterRegistry() {
 	return registry;
 }
 
+// Stashed database handle from extension init, used to create connections for reading http_config
+static duckdb_database g_database = nullptr;
+
+void SetDatabase(duckdb_database db) {
+	g_database = db;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers: extract MAP parameters, read config variable
 // ---------------------------------------------------------------------------
@@ -63,11 +70,16 @@ static std::vector<std::pair<std::string, std::string>> ExtractMapParam(duckdb_v
 	return result;
 }
 
-//! Read the http_config variable by executing SQL on the stored connection.
+//! Read the http_config variable by opening a temporary connection.
 //! Uses the chunk-based API (stable) rather than deprecated row-based accessors.
-static std::vector<std::pair<std::string, std::string>> ReadHttpConfigVariable(duckdb_connection conn) {
+static std::vector<std::pair<std::string, std::string>> ReadHttpConfigVariable() {
 	std::vector<std::pair<std::string, std::string>> entries;
-	if (!conn) {
+	if (!g_database) {
+		return entries;
+	}
+
+	duckdb_connection conn;
+	if (duckdb_connect(g_database, &conn) == DuckDBError) {
 		return entries;
 	}
 
@@ -77,6 +89,7 @@ static std::vector<std::pair<std::string, std::string>> ReadHttpConfigVariable(d
 	                                "unnest(map_values(getvariable('http_config'))) AS value)", &result);
 	if (state == DuckDBError) {
 		duckdb_destroy_result(&result);
+		duckdb_disconnect(&conn);
 		return entries;
 	}
 
@@ -102,6 +115,7 @@ static std::vector<std::pair<std::string, std::string>> ReadHttpConfigVariable(d
 		duckdb_destroy_data_chunk(&chunk);
 	}
 	duckdb_destroy_result(&result);
+	duckdb_disconnect(&conn);
 	return entries;
 }
 
@@ -140,7 +154,7 @@ struct HttpBindData {
 	std::string body;
 	std::string content_type;
 	int timeout_override = -1; // -1 means use config
-	duckdb_connection connection = nullptr;
+	int verify_ssl_override = -1; // -1 means use config, 0 = false, 1 = true
 };
 
 static void DestroyBindData(void *data) {
@@ -178,9 +192,10 @@ struct HttpResult {
 };
 
 static HttpResult ExecuteRequest(const HttpBindData &bind_data) {
-	// Resolve config
-	auto config_entries = ReadHttpConfigVariable(bind_data.connection);
-	auto config = ResolveConfig(bind_data.url, config_entries);
+	// Resolve config — variable reading is currently disabled because variables
+	// are per-connection and we can't access the caller's connection from here.
+	// Config comes from hard-coded defaults + per-call overrides for now.
+	HttpConfig config;
 
 	// Apply per-call timeout override
 	int timeout = (bind_data.timeout_override >= 0) ? bind_data.timeout_override : config.timeout;
@@ -234,7 +249,8 @@ static HttpResult ExecuteRequest(const HttpBindData &bind_data) {
 	session.SetHeader(cpr_headers);
 	session.SetTimeout(cpr::Timeout{timeout * 1000});
 
-	if (!config.verify_ssl) {
+	bool verify_ssl = (bind_data.verify_ssl_override >= 0) ? (bind_data.verify_ssl_override == 1) : config.verify_ssl;
+	if (!verify_ssl) {
 		session.SetVerifySsl(cpr::VerifySsl{false});
 	}
 	if (!config.ca_bundle.empty()) {
@@ -311,7 +327,6 @@ static HttpResult ExecuteRequest(const HttpBindData &bind_data) {
 //! Shared bind for all HTTP methods. Method is stored in extra_info.
 static void HttpBind(duckdb_bind_info info) {
 	auto *bind_data = new HttpBindData();
-
 	// Get the method from extra_info
 	auto *method = static_cast<const char *>(duckdb_bind_get_extra_info(info));
 	bind_data->method = method;
@@ -384,6 +399,12 @@ static void HttpBind(duckdb_bind_info info) {
 	if (timeout_val) {
 		bind_data->timeout_override = static_cast<int>(duckdb_get_int64(timeout_val));
 		duckdb_destroy_value(&timeout_val);
+	}
+
+	duckdb_value verify_ssl_val = duckdb_bind_get_named_parameter(info, "verify_ssl");
+	if (verify_ssl_val) {
+		bind_data->verify_ssl_override = duckdb_get_bool(verify_ssl_val) ? 1 : 0;
+		duckdb_destroy_value(&verify_ssl_val);
 	}
 
 	// Define output columns
@@ -495,6 +516,10 @@ static void RegisterHttpMethod(duckdb_connection connection, const char *name, c
 		duckdb_table_function_add_named_parameter(function, "content_type", varchar_type);
 	}
 	duckdb_table_function_add_named_parameter(function, "timeout", int_type);
+
+	duckdb_logical_type bool_type = duckdb_create_logical_type(DUCKDB_TYPE_BOOLEAN);
+	duckdb_table_function_add_named_parameter(function, "verify_ssl", bool_type);
+	duckdb_destroy_logical_type(&bool_type);
 
 	duckdb_destroy_logical_type(&varchar_type);
 	duckdb_destroy_logical_type(&int_type);

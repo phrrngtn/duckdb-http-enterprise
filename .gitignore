@@ -7,3 +7,5 @@ __pycache__/
 *.pyc
 .idea/
 cmake-build-*/
+test/cert.pem
+test/key.pem
