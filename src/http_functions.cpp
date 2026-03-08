@@ -602,21 +602,34 @@ static std::string ReadVarchar(duckdb_vector vec, uint64_t *validity, idx_t row)
 	return std::string(str, len);
 }
 
-//! Convert an HttpResult to a JSON string for the scalar function output.
-static std::string ResultToJson(const HttpResult &result) {
-	nlohmann::json j;
-	j["request_url"] = result.request_url;
-	j["request_method"] = result.request_method;
-	j["request_headers"] = nlohmann::json::parse(result.request_headers_json);
-	j["request_body"] = result.request_body;
-	j["response_status_code"] = result.response_status_code;
-	j["response_status"] = result.response_status;
-	j["response_headers"] = nlohmann::json::parse(result.response_headers_json);
-	j["response_body"] = result.response_body;
-	j["response_url"] = result.response_url;
-	j["elapsed"] = result.elapsed;
-	j["redirect_count"] = result.redirect_count;
-	return j.dump();
+//! Write an HttpResult into the struct output vector at the given row index.
+static void WriteResultToStruct(duckdb_vector output, idx_t row, const HttpResult &result) {
+	auto set_varchar = [&](idx_t col, const std::string &val) {
+		duckdb_vector vec = duckdb_struct_vector_get_child(output, col);
+		duckdb_vector_assign_string_element_len(vec, row, val.c_str(), val.length());
+	};
+	auto set_int = [&](idx_t col, int val) {
+		duckdb_vector vec = duckdb_struct_vector_get_child(output, col);
+		auto *data = (int32_t *)duckdb_vector_get_data(vec);
+		data[row] = val;
+	};
+	auto set_double = [&](idx_t col, double val) {
+		duckdb_vector vec = duckdb_struct_vector_get_child(output, col);
+		auto *data = (double *)duckdb_vector_get_data(vec);
+		data[row] = val;
+	};
+
+	set_varchar(0, result.request_url);
+	set_varchar(1, result.request_method);
+	set_varchar(2, result.request_headers_json);
+	set_varchar(3, result.request_body);
+	set_int(4, result.response_status_code);
+	set_varchar(5, result.response_status);
+	set_varchar(6, result.response_headers_json);
+	set_varchar(7, result.response_body);
+	set_varchar(8, result.response_url);
+	set_double(9, result.elapsed);
+	set_int(10, result.redirect_count);
 }
 
 static void HttpRawRequestScalarFunc(duckdb_function_info info, duckdb_data_chunk input, duckdb_vector output) {
@@ -734,20 +747,52 @@ static void HttpRawRequestScalarFunc(duckdb_function_info info, duckdb_data_chun
 		}
 	}
 
-	// --- Phase 3: Write results to output vector ---
+	// --- Phase 3: Write results to struct output vector ---
 	for (idx_t row = 0; row < input_size; row++) {
-		auto json_str = ResultToJson(results[row]);
-		duckdb_vector_assign_string_element_len(output, row, json_str.c_str(), json_str.length());
+		WriteResultToStruct(output, row, results[row]);
 	}
 }
 
-static void RegisterHttpRawRequestScalar(duckdb_connection connection) {
+// Build the STRUCT return type matching the table function's output schema.
+static duckdb_logical_type CreateHttpResultStructType() {
+	duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+	duckdb_logical_type int_type = duckdb_create_logical_type(DUCKDB_TYPE_INTEGER);
+	duckdb_logical_type double_type = duckdb_create_logical_type(DUCKDB_TYPE_DOUBLE);
+
+	duckdb_logical_type member_types[] = {
+	    varchar_type, varchar_type, varchar_type, varchar_type,  // request_url, method, headers, body
+	    int_type,                                                 // response_status_code
+	    varchar_type, varchar_type, varchar_type, varchar_type,  // response_status, headers, body, url
+	    double_type,                                              // elapsed
+	    int_type                                                  // redirect_count
+	};
+	const char *member_names[] = {
+	    "request_url", "request_method", "request_headers", "request_body",
+	    "response_status_code",
+	    "response_status", "response_headers", "response_body", "response_url",
+	    "elapsed",
+	    "redirect_count"
+	};
+
+	duckdb_logical_type struct_type = duckdb_create_struct_type(member_types, member_names, 11);
+
+	duckdb_destroy_logical_type(&varchar_type);
+	duckdb_destroy_logical_type(&int_type);
+	duckdb_destroy_logical_type(&double_type);
+
+	return struct_type;
+}
+
+//! Register a scalar HTTP function with the given name and volatility.
+//! Both the idempotent and volatile variants share the same implementation;
+//! they differ only in how the optimizer treats them.
+static void RegisterHttpScalarVariant(duckdb_connection connection, const char *name, bool is_volatile) {
 	duckdb_scalar_function function = duckdb_create_scalar_function();
-	duckdb_scalar_function_set_name(function, "_http_raw_request");
+	duckdb_scalar_function_set_name(function, name);
 
 	duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
 
-	// _http_raw_request(method, url, headers_json, body, content_type, config_json)
+	// (method, url, headers_json, body, content_type, config_json)
 	duckdb_scalar_function_add_parameter(function, varchar_type); // method
 	duckdb_scalar_function_add_parameter(function, varchar_type); // url
 	duckdb_scalar_function_add_parameter(function, varchar_type); // headers (JSON string)
@@ -755,15 +800,26 @@ static void RegisterHttpRawRequestScalar(duckdb_connection connection) {
 	duckdb_scalar_function_add_parameter(function, varchar_type); // content_type
 	duckdb_scalar_function_add_parameter(function, varchar_type); // config (JSON string)
 
-	duckdb_scalar_function_set_return_type(function, varchar_type);
+	duckdb_logical_type struct_type = CreateHttpResultStructType();
+	duckdb_scalar_function_set_return_type(function, struct_type);
+	duckdb_destroy_logical_type(&struct_type);
 	duckdb_destroy_logical_type(&varchar_type);
 
 	duckdb_scalar_function_set_function(function, HttpRawRequestScalarFunc);
 	duckdb_scalar_function_set_special_handling(function);
-	duckdb_scalar_function_set_volatile(function);
+	if (is_volatile) {
+		duckdb_scalar_function_set_volatile(function);
+	}
 
 	duckdb_register_scalar_function(connection, function);
 	duckdb_destroy_scalar_function(&function);
+}
+
+static void RegisterHttpRawRequestScalar(duckdb_connection connection) {
+	// Idempotent variant: safe to deduplicate identical calls (GET, HEAD, etc.)
+	RegisterHttpScalarVariant(connection, "_http_raw_request", false);
+	// Volatile variant: every call fires regardless of argument identity (POST, PATCH, etc.)
+	RegisterHttpScalarVariant(connection, "_http_raw_request_volatile", true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,14 +1066,77 @@ void RegisterHttpMacros(duckdb_connection connection) {
 		"body := body, content_type := content_type, "
 		"timeout := timeout, verify_ssl := verify_ssl, _config := _http_config())");
 
-	// Scalar macro: http_request(method, url, ...)
-	// Named optional params with defaults, wraps _http_raw_request with config injection.
+	// --- Scalar macros ---
+	// Per-verb scalar macros route to the idempotent or volatile variant
+	// based on HTTP method semantics.
+
+	// Idempotent verbs: safe to deduplicate identical calls within a query.
+	// GET, HEAD, OPTIONS are read-only; PUT and DELETE are idempotent by spec.
+	const char *idempotent_scalar_macros[] = {
+		"CREATE OR REPLACE MACRO http_get_s(url, "
+		"headers := NULL::VARCHAR) AS "
+		"_http_raw_request('GET', url, headers, NULL, NULL, "
+		"CAST(_http_config() AS JSON))",
+
+		"CREATE OR REPLACE MACRO http_head_s(url, "
+		"headers := NULL::VARCHAR) AS "
+		"_http_raw_request('HEAD', url, headers, NULL, NULL, "
+		"CAST(_http_config() AS JSON))",
+
+		"CREATE OR REPLACE MACRO http_options_s(url, "
+		"headers := NULL::VARCHAR) AS "
+		"_http_raw_request('OPTIONS', url, headers, NULL, NULL, "
+		"CAST(_http_config() AS JSON))",
+
+		"CREATE OR REPLACE MACRO http_put_s(url, "
+		"headers := NULL::VARCHAR, body := NULL::VARCHAR, "
+		"content_type := NULL::VARCHAR) AS "
+		"_http_raw_request('PUT', url, headers, body, content_type, "
+		"CAST(_http_config() AS JSON))",
+
+		"CREATE OR REPLACE MACRO http_delete_s(url, "
+		"headers := NULL::VARCHAR) AS "
+		"_http_raw_request('DELETE', url, headers, NULL, NULL, "
+		"CAST(_http_config() AS JSON))",
+	};
+	for (auto *sql : idempotent_scalar_macros) {
+		TryRegisterMacro(connection, sql);
+	}
+
+	// Non-idempotent verbs: volatile, every call fires.
+	const char *volatile_scalar_macros[] = {
+		"CREATE OR REPLACE MACRO http_post_s(url, "
+		"headers := NULL::VARCHAR, body := NULL::VARCHAR, "
+		"content_type := NULL::VARCHAR) AS "
+		"_http_raw_request_volatile('POST', url, headers, body, content_type, "
+		"CAST(_http_config() AS JSON))",
+
+		"CREATE OR REPLACE MACRO http_patch_s(url, "
+		"headers := NULL::VARCHAR, body := NULL::VARCHAR, "
+		"content_type := NULL::VARCHAR) AS "
+		"_http_raw_request_volatile('PATCH', url, headers, body, content_type, "
+		"CAST(_http_config() AS JSON))",
+	};
+	for (auto *sql : volatile_scalar_macros) {
+		TryRegisterMacro(connection, sql);
+	}
+
+	// Generic scalar: method is a runtime parameter, so must be volatile
+	// (we can't know at compile time whether it's idempotent).
 	TryRegisterMacro(connection,
 		"CREATE OR REPLACE MACRO http_request(method, url, "
 		"headers := NULL::VARCHAR, body := NULL::VARCHAR, "
 		"content_type := NULL::VARCHAR) AS "
-		"_http_raw_request(method, url, headers, body, content_type, "
+		"_http_raw_request_volatile(method, url, headers, body, content_type, "
 		"CAST(_http_config() AS JSON))");
+
+	// JSON variants: wrap the STRUCT with to_json().
+	TryRegisterMacro(connection,
+		"CREATE OR REPLACE MACRO http_request_json(method, url, "
+		"headers := NULL::VARCHAR, body := NULL::VARCHAR, "
+		"content_type := NULL::VARCHAR) AS "
+		"to_json(_http_raw_request_volatile(method, url, headers, body, content_type, "
+		"CAST(_http_config() AS JSON)))");
 }
 
 // ---------------------------------------------------------------------------

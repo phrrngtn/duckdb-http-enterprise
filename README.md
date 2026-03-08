@@ -113,71 +113,108 @@ All table functions return the same schema:
 | `timeout` | INTEGER | all | Request timeout in seconds (overrides config) |
 | `verify_ssl` | BOOLEAN | all | SSL certificate verification (overrides config) |
 
-### Scalar function: `http_request(method, url, [headers, body, content_type])`
+### Scalar functions
 
-Returns a JSON string containing the full request/response envelope. This is
-the function to use for data-driven workflows where URLs come from a query.
-The function is marked `VOLATILE` — it will be called for every row even when
-all arguments are identical.
+Scalar functions return a STRUCT with the same fields as the table functions.
+Use dot notation or a subquery to access individual fields.
+
+#### Per-verb scalar functions (recommended)
+
+These follow HTTP idempotency semantics: `http_get_s`, `http_head_s`,
+`http_options_s`, `http_put_s`, and `http_delete_s` are idempotent — DuckDB
+may safely deduplicate identical calls within a query. `http_post_s` and
+`http_patch_s` are volatile — every call fires regardless.
 
 ```sql
--- Basic GET — no trailing NULLs needed
-SELECT json_extract(
-    http_request('GET', 'https://httpbin.org/get'),
-    '$.response_status_code'
-)::INTEGER AS status;
+-- Simple GET with struct field access
+SELECT r.response_status_code, r.response_body
+FROM (SELECT http_get_s('https://httpbin.org/get') AS r);
 ```
 
 ```sql
--- POST with named parameters
-SELECT json_extract(
-    http_request('POST', 'https://httpbin.org/post',
-        body := '{"name": "duckdb"}',
-        content_type := 'application/json'),
-    '$.response_status_code')::INTEGER AS status;
+-- POST (volatile — always fires)
+SELECT r.response_status_code
+FROM (SELECT http_post_s('https://httpbin.org/post',
+    body := '{"name": "duckdb"}',
+    content_type := 'application/json') AS r);
 ```
 
 ```sql
--- Data-driven: fetch from a list of URLs
-SELECT
-    url,
-    json_extract(http_request('GET', url),
-        '$.response_status_code')::INTEGER AS status
-FROM (VALUES
-    ('https://httpbin.org/get'),
-    ('https://httpbin.org/ip')
-) AS t(url)
+-- Data-driven batch: fetch from a list of URLs
+SELECT url, r.response_status_code AS status, round(r.elapsed, 3) AS seconds
+FROM (
+    SELECT url, http_get_s(url) AS r
+    FROM (VALUES ('https://httpbin.org/get'), ('https://httpbin.org/ip')) AS t(url)
+)
 ORDER BY url;
 ```
 
 ```sql
--- With headers as a JSON string
-SELECT json_extract_string(
-    http_request('GET', 'https://httpbin.org/get',
-        headers := '{"Authorization": "Bearer my-token"}'),
-    '$.response_body')
-AS body;
+-- Batch API calls driven by table data
+SELECT e.endpoint_url, r.response_status_code AS status
+FROM (
+    SELECT e.endpoint_url, http_get_s(e.endpoint_url) AS r
+    FROM endpoints AS e
+    LEFT OUTER JOIN health_checks AS h ON h.url = e.endpoint_url
+    WHERE h.url IS NULL
+);
 ```
 
+#### Generic scalar function: `http_request(method, url, ...)`
+
+For dynamic methods or when the verb isn't known at query-writing time. Always
+volatile (every call fires).
+
 ```sql
--- Batch API calls driven by table data
-SELECT
-    e.endpoint_url,
-    json_extract(
-        http_request('GET', e.endpoint_url),
-        '$.response_status_code')::INTEGER AS status
-FROM endpoints AS e
-LEFT OUTER JOIN health_checks AS h ON h.url = e.endpoint_url
-WHERE h.url IS NULL;
+SELECT r.response_status_code
+FROM (SELECT http_request('GET', 'https://httpbin.org/get') AS r);
 ```
+
+#### JSON variant: `http_request_json(method, url, ...)`
+
+Returns the same result as `http_request` but serialized as a JSON string via
+DuckDB's `to_json()`.
+
+```sql
+SELECT http_request_json('GET', 'https://httpbin.org/ip');
+```
+
+#### Scalar function parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `method` | VARCHAR | (required) | HTTP method |
 | `url` | VARCHAR | (required) | Request URL |
 | `headers` | VARCHAR (JSON) | NULL | Request headers as JSON object |
-| `body` | VARCHAR | NULL | Request body |
+| `body` | VARCHAR | NULL | Request body (POST, PUT, PATCH only) |
 | `content_type` | VARCHAR | NULL | Content-Type (defaults to `application/json` if body is set) |
+
+The generic `http_request` also takes `method` (VARCHAR) as the first
+parameter.
+
+#### Recommended pattern: subquery or CTE
+
+Always assign the scalar function result to an alias in a subquery or CTE,
+then access fields from the alias. This ensures the HTTP request fires exactly
+once per row, regardless of how many fields you reference.
+
+```sql
+-- Good: one request, access multiple fields
+WITH api_calls AS (
+    SELECT id, http_get_s('https://api.example.com/item/' || id) AS r
+    FROM items
+)
+SELECT id, r.response_status_code, r.response_body, r.elapsed
+FROM api_calls;
+
+-- Bad: fires two requests per row (DuckDB evaluates each expression separately)
+SELECT
+    http_get_s(url).response_status_code,
+    http_get_s(url).elapsed
+FROM urls;
+```
+
+This is consistent with how SQL handles any expensive expression — factor it
+into a subquery and reference the result by name.
 
 ## Configuration
 

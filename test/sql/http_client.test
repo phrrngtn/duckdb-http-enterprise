@@ -82,25 +82,41 @@ SELECT response_status_code FROM http_do('PUT', 'https://httpbin.org/put', body 
 200
 
 # ---------------------------------------------------------------------------
-# http_request: scalar function (works with column references)
+# Scalar functions: STRUCT return type
 # ---------------------------------------------------------------------------
 
+# http_get_s: idempotent scalar GET
 query I
-SELECT json_extract(http_request('GET', 'https://httpbin.org/get', NULL, NULL, NULL), '$.response_status_code');
+SELECT r.response_status_code FROM (SELECT http_get_s('https://httpbin.org/get') AS r);
+----
+200
+
+# http_post_s: volatile scalar POST
+query I
+SELECT r.response_status_code FROM (SELECT http_post_s('https://httpbin.org/post', body := '{"key": "val"}', content_type := 'application/json') AS r);
+----
+200
+
+# http_request: generic scalar (volatile)
+query I
+SELECT r.response_status_code FROM (SELECT http_request('GET', 'https://httpbin.org/get') AS r);
 ----
 200
 
 # Data-driven: URLs from a table
 query II
-SELECT url, json_extract(http_request('GET', url, NULL, NULL, NULL), '$.response_status_code')::INTEGER AS status
-FROM (VALUES ('https://httpbin.org/get'), ('https://httpbin.org/ip')) AS t(url)
+SELECT url, r.response_status_code AS status
+FROM (
+    SELECT url, http_get_s(url) AS r
+    FROM (VALUES ('https://httpbin.org/get'), ('https://httpbin.org/ip')) AS t(url)
+)
 ORDER BY url;
 ----
 https://httpbin.org/get	200
 https://httpbin.org/ip	200
 
-# Scalar POST with JSON body
+# http_request_json: JSON variant
 query I
-SELECT json_extract_string(http_request('POST', 'https://httpbin.org/post', NULL, '{"key": "val"}', 'application/json'), '$.response_status_code');
+SELECT json_extract(http_request_json('GET', 'https://httpbin.org/get'), '$.response_status_code');
 ----
 200
