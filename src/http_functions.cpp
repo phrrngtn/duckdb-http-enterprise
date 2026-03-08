@@ -202,6 +202,19 @@ BuildSession(const HttpBindData &bind_data, const HttpConfig &config) {
 		}
 	} else if (config.auth_type == "bearer" && !config.bearer_token.empty() &&
 	           cpr_headers.find("Authorization") == cpr_headers.end()) {
+		// Check expiry before using the token
+		if (config.bearer_token_expires_at > 0) {
+			auto now = std::chrono::system_clock::now();
+			auto now_epoch = std::chrono::duration_cast<std::chrono::seconds>(
+			    now.time_since_epoch()).count();
+			if (now_epoch >= config.bearer_token_expires_at) {
+				throw std::runtime_error(
+				    "Bearer token for " + ExtractHost(bind_data.url) +
+				    " expired at " + std::to_string(config.bearer_token_expires_at) +
+				    " (current time: " + std::to_string(now_epoch) +
+				    "). Refresh the token via your application and update http_config.");
+			}
+		}
 		cpr_headers["Authorization"] = "Bearer " + config.bearer_token;
 	}
 

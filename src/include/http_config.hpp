@@ -19,6 +19,7 @@ struct HttpConfig {
 	std::string client_key;        // empty = no client key
 	std::string auth_type;         // "negotiate", "bearer", or empty
 	std::string bearer_token;      // for auth_type=bearer
+	int64_t bearer_token_expires_at = 0; // Unix epoch seconds; 0 = no expiry check
 	int max_concurrent = 10;       // max parallel requests in a scalar function chunk
 	std::string global_rate_limit_spec; // empty = no global limit; only meaningful from "default" scope
 	double global_burst = 10.0;
@@ -54,6 +55,9 @@ struct HttpConfig {
 		}
 		if (j.contains("bearer_token") && j["bearer_token"].is_string()) {
 			bearer_token = j["bearer_token"].get<std::string>();
+		}
+		if (j.contains("bearer_token_expires_at") && j["bearer_token_expires_at"].is_number()) {
+			bearer_token_expires_at = j["bearer_token_expires_at"].get<int64_t>();
 		}
 		if (j.contains("max_concurrent") && j["max_concurrent"].is_number()) {
 			max_concurrent = j["max_concurrent"].get<int>();
