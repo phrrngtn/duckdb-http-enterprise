@@ -42,7 +42,7 @@ FROM (SELECT http_get('https://httpbin.org/get') AS r);
 -- GET with custom headers
 SELECT r.response_body
 FROM (SELECT http_get('https://httpbin.org/get',
-    headers := '{"X-Api-Key": "secret123"}') AS r);
+    headers := MAP {'X-Api-Key': 'secret123'}) AS r);
 ```
 
 ```sql
@@ -109,11 +109,11 @@ All scalar functions return a STRUCT with the same fields:
 |-------|------|-------------|
 | `request_url` | VARCHAR | The URL as sent |
 | `request_method` | VARCHAR | HTTP method used |
-| `request_headers` | VARCHAR (JSON) | Headers sent, as a JSON object |
+| `request_headers` | MAP(VARCHAR, VARCHAR) | Headers sent |
 | `request_body` | VARCHAR | Request body, if any |
 | `response_status_code` | INTEGER | HTTP status code (200, 404, etc.) |
 | `response_status` | VARCHAR | Status line (e.g. `HTTP/1.1 200 OK`) |
-| `response_headers` | VARCHAR (JSON) | Response headers as a JSON object |
+| `response_headers` | MAP(VARCHAR, VARCHAR) | Response headers (keys are lowercase, as normalized by libcurl) |
 | `response_body` | VARCHAR | Response body |
 | `response_url` | VARCHAR | Final URL after redirects |
 | `elapsed` | DOUBLE | Request duration in seconds |
@@ -124,7 +124,7 @@ All scalar functions return a STRUCT with the same fields:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `url` | VARCHAR | (required) | Request URL |
-| `headers` | VARCHAR (JSON) | NULL | Request headers as JSON object |
+| `headers` | MAP(VARCHAR, VARCHAR) | NULL | Request headers as a MAP literal |
 | `body` | VARCHAR | NULL | Request body (POST, PUT, PATCH only) |
 | `content_type` | VARCHAR | NULL | Content-Type (defaults to `application/json` if body is set) |
 
@@ -357,7 +357,7 @@ Use it to authenticate HTTP requests to Kerberos-protected services:
 ```sql
 SELECT r.response_status_code, r.response_body
 FROM (SELECT http_get('https://intranet.example.com/api/data',
-    headers := '{"Authorization": "' || negotiate_auth_header('https://intranet.example.com/api/data') || '"}') AS r);
+    headers := MAP {'Authorization': negotiate_auth_header('https://intranet.example.com/api/data')}) AS r);
 ```
 
 Or configure it globally so all requests to a host auto-authenticate:
@@ -559,7 +559,7 @@ duckdb -unsigned -cmd "LOAD 'build/release/http_client.duckdb_extension';" -c "
     -- Authenticated request
     SELECT r.response_status_code, r.response_body
     FROM (SELECT http_get('https://localhost:8443/data.json',
-        headers := '{\"Authorization\": \"' || negotiate_auth_header('https://localhost:8443/data.json') || '\"}') AS r);
+        headers := MAP {'Authorization': negotiate_auth_header('https://localhost:8443/data.json')}) AS r);
 "
 ```
 

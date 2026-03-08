@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        run: pip install flask duckdb
+
+      - name: Build extension
+        run: make release
+
+      - name: Start local test server
+        run: |
+          python3 test/flask_concurrency_server.py &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8444/health > /dev/null && break
+            sleep 0.5
+          done
+
+      - name: Run local tests
+        run: |
+          python3 -c "
+          import duckdb
+
+          con = duckdb.connect()
+          con.execute(\"SET allow_unsigned_extensions = true\")
+          con.execute(\"LOAD 'build/release/http_client.duckdb_extension'\")
+
+          # Basic GET
+          r = con.execute(\"SELECT r.response_status_code FROM (SELECT http_get('http://localhost:8444/fast') AS r)\").fetchone()
+          assert r[0] == 200, f'Expected 200, got {r[0]}'
+
+          # GET with MAP headers
+          r = con.execute(\"SELECT r.response_status_code FROM (SELECT http_get('http://localhost:8444/fast', headers := MAP {'X-Test': 'ci'}) AS r)\").fetchone()
+          assert r[0] == 200, f'Expected 200, got {r[0]}'
+
+          # Response headers are MAP
+          r = con.execute(\"SELECT r.response_headers['content-type'] FROM (SELECT http_get('http://localhost:8444/fast') AS r)\").fetchone()
+          assert r[0] is not None, 'Expected content-type header'
+
+          # POST (volatile)
+          r = con.execute(\"SELECT r.response_status_code FROM (SELECT http_post('http://localhost:8444/fast', body := '{\\\"k\\\": \\\"v\\\"}', content_type := 'application/json') AS r)\").fetchone()
+          assert r[0] in (200, 405), f'Expected 200 or 405, got {r[0]}'
+
+          # Generic http_request
+          r = con.execute(\"SELECT r.response_status_code FROM (SELECT http_request('GET', 'http://localhost:8444/fast') AS r)\").fetchone()
+          assert r[0] == 200, f'Expected 200, got {r[0]}'
+
+          # Data-driven batch (multiple URLs)
+          rows = con.execute(\"\"\"
+              SELECT r.response_status_code AS status
+              FROM (
+                  SELECT http_get(url) AS r
+                  FROM (VALUES ('http://localhost:8444/fast'), ('http://localhost:8444/health')) AS t(url)
+              )
+          \"\"\").fetchall()
+          assert len(rows) == 2, f'Expected 2 rows, got {len(rows)}'
+          assert all(r[0] == 200 for r in rows), f'Expected all 200s, got {[r[0] for r in rows]}'
+
+          # Rate limit stats
+          rows = con.execute('SELECT * FROM http_rate_limit_stats()').fetchall()
+          assert len(rows) > 0, 'Expected rate limit stats rows'
+
+          # negotiate_auth_header error cases
+          try:
+              con.execute(\"SELECT negotiate_auth_header('http://example.com')\")
+              assert False, 'Expected error for HTTP URL'
+          except Exception as e:
+              assert 'HTTPS' in str(e), f'Expected HTTPS error, got {e}'
+
+          try:
+              con.execute(\"SELECT negotiate_auth_header('not-a-url')\")
+              assert False, 'Expected error for invalid URL'
+          except Exception as e:
+              assert 'Invalid URL' in str(e), f'Expected Invalid URL error, got {e}'
+
+          print('All tests passed')
+          "

@@ -15,6 +15,8 @@ struct HttpConfig {
 	bool verify_ssl = true;
 	std::string proxy;             // empty = no proxy
 	std::string ca_bundle;         // empty = system default
+	std::string client_cert;       // empty = no client certificate
+	std::string client_key;        // empty = no client key
 	std::string auth_type;         // "negotiate", "bearer", or empty
 	std::string bearer_token;      // for auth_type=bearer
 	int max_concurrent = 10;       // max parallel requests in a scalar function chunk
@@ -40,6 +42,12 @@ struct HttpConfig {
 		}
 		if (j.contains("ca_bundle") && j["ca_bundle"].is_string()) {
 			ca_bundle = j["ca_bundle"].get<std::string>();
+		}
+		if (j.contains("client_cert") && j["client_cert"].is_string()) {
+			client_cert = j["client_cert"].get<std::string>();
+		}
+		if (j.contains("client_key") && j["client_key"].is_string()) {
+			client_key = j["client_key"].get<std::string>();
 		}
 		if (j.contains("auth_type") && j["auth_type"].is_string()) {
 			auth_type = j["auth_type"].get<std::string>();
