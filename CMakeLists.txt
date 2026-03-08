@@ -88,6 +88,9 @@ if (DUCKDB_WASM_EXTENSION)
 	add_library(${EXTENSION_NAME} STATIC ${EXTENSION_SOURCES})
 else()
 	add_library(${EXTENSION_NAME} SHARED ${EXTENSION_SOURCES})
+	if(WIN32 AND MINGW)
+		set_target_properties(${EXTENSION_NAME} PROPERTIES PREFIX "")
+	endif()
 endif()
 
 # Hide symbols
