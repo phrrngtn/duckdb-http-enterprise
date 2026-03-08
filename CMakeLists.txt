@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5...3.29)
+cmake_minimum_required(VERSION 3.14...3.29)
 option(DUCKDB_WASM_EXTENSION "Whether compiling for Wasm target" OFF)
 
 ###
@@ -30,9 +30,36 @@ project(${EXTENSION_NAME} LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+###
+# Dependencies
+###
+include(FetchContent)
+
+# nlohmann/json — header-only JSON library
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE
+)
+set(JSON_BuildTests OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(nlohmann_json)
+
+# cpr — C++ Requests: Curl for People
+FetchContent_Declare(
+    cpr
+    GIT_REPOSITORY https://github.com/libcpr/cpr.git
+    GIT_TAG        1.11.2
+    GIT_SHALLOW    TRUE
+)
+set(CPR_BUILD_TESTS OFF CACHE INTERNAL "")
+set(BUILD_SHARED_LIBS OFF CACHE INTERNAL "")
+FetchContent_MakeAvailable(cpr)
+
 # Extension sources
 set(EXTENSION_SOURCES
         src/http_client_extension.cpp
+        src/http_functions.cpp
         src/negotiate_auth.cpp
 )
 
@@ -54,6 +81,22 @@ target_include_directories(${EXTENSION_NAME} PRIVATE src/include)
 
 # Include DuckDB C API headers
 target_include_directories(${EXTENSION_NAME} PRIVATE duckdb_capi)
+
+# On macOS with Homebrew, ensure linker can find Homebrew libraries (e.g. libidn2)
+if(APPLE)
+    execute_process(
+        COMMAND brew --prefix
+        OUTPUT_VARIABLE HOMEBREW_PREFIX
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(HOMEBREW_PREFIX)
+        target_link_directories(${EXTENSION_NAME} PRIVATE ${HOMEBREW_PREFIX}/lib)
+    endif()
+endif()
+
+# Link dependencies
+target_link_libraries(${EXTENSION_NAME} PRIVATE nlohmann_json::nlohmann_json cpr::cpr)
 
 # Link SSPI on Windows
 if(WIN32)

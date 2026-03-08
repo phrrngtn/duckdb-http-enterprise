@@ -4,6 +4,10 @@
 
 require http_client
 
+# ---------------------------------------------------------------------------
+# negotiate_auth_header: error cases
+# ---------------------------------------------------------------------------
+
 # negotiate_auth_header requires HTTPS
 statement error
 SELECT negotiate_auth_header('http://example.com');
@@ -15,3 +19,88 @@ statement error
 SELECT negotiate_auth_header('not-a-url');
 ----
 Invalid URL
+
+# negotiate_auth_header_json requires HTTPS
+statement error
+SELECT negotiate_auth_header_json('http://example.com');
+----
+Negotiate authentication requires HTTPS
+
+# negotiate_auth_header_json requires a valid URL
+statement error
+SELECT negotiate_auth_header_json('not-a-url');
+----
+Invalid URL
+
+# ---------------------------------------------------------------------------
+# http_get: table function
+# ---------------------------------------------------------------------------
+
+query I
+SELECT response_status_code FROM http_get('https://httpbin.org/get');
+----
+200
+
+# GET with query params
+query I
+SELECT json_extract_string(response_body, '$.args.q') FROM http_get('https://httpbin.org/get', params := MAP {'q': 'duckdb'});
+----
+duckdb
+
+# GET with custom headers
+query I
+SELECT json_extract_string(response_body, '$.headers.X-Custom') FROM http_get('https://httpbin.org/get', headers := MAP {'X-Custom': 'test123'});
+----
+test123
+
+# ---------------------------------------------------------------------------
+# http_post: table function
+# ---------------------------------------------------------------------------
+
+query I
+SELECT response_status_code FROM http_post('https://httpbin.org/post', body := '{"name": "duckdb"}');
+----
+200
+
+query I
+SELECT json_extract_string(response_body, '$.json.name') FROM http_post('https://httpbin.org/post', body := '{"name": "duckdb"}');
+----
+duckdb
+
+# ---------------------------------------------------------------------------
+# http_do: generic method
+# ---------------------------------------------------------------------------
+
+query I
+SELECT response_status_code FROM http_do('DELETE', 'https://httpbin.org/delete');
+----
+200
+
+query I
+SELECT response_status_code FROM http_do('PUT', 'https://httpbin.org/put', body := '{"x": 1}');
+----
+200
+
+# ---------------------------------------------------------------------------
+# http_request: scalar function (works with column references)
+# ---------------------------------------------------------------------------
+
+query I
+SELECT json_extract(http_request('GET', 'https://httpbin.org/get', NULL, NULL, NULL), '$.response_status_code');
+----
+200
+
+# Data-driven: URLs from a table
+query II
+SELECT url, json_extract(http_request('GET', url, NULL, NULL, NULL), '$.response_status_code')::INTEGER AS status
+FROM (VALUES ('https://httpbin.org/get'), ('https://httpbin.org/ip')) AS t(url)
+ORDER BY url;
+----
+https://httpbin.org/get	200
+https://httpbin.org/ip	200
+
+# Scalar POST with JSON body
+query I
+SELECT json_extract_string(http_request('POST', 'https://httpbin.org/post', NULL, '{"key": "val"}', 'application/json'), '$.response_status_code');
+----
+200

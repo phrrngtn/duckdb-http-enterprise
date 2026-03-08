@@ -111,7 +111,15 @@ bool NegotiateAuthIsAvailable() {
 	return true;
 }
 
-std::string GenerateNegotiateToken(const std::string &url) {
+std::string GetSecurityLibraryName() {
+	return "secur32.dll";
+}
+
+std::string GetProviderName() {
+	return "SSPI";
+}
+
+NegotiateResult GenerateNegotiateToken(const std::string &url) {
 	auto hostname = ExtractHostname(url);
 
 	// SSPI uses "HTTP/hostname" (forward slash) for the SPN
@@ -156,7 +164,14 @@ std::string GenerateNegotiateToken(const std::string &url) {
 	DeleteSecurityContext(&ctx_handle);
 	FreeCredentialsHandle(&cred_handle);
 
-	return token_b64;
+	NegotiateResult result;
+	result.token = token_b64;
+	result.url = url;
+	result.hostname = hostname;
+	result.spn = spn_narrow;
+	result.provider = "SSPI";
+	result.library = "secur32.dll";
+	return result;
 }
 
 #else // !_WIN32
@@ -299,12 +314,54 @@ static std::string GSSStatusToString(OM_uint32 major, OM_uint32 minor) {
 	return result;
 }
 
+static std::string GetLoadedLibraryPath() {
+	std::call_once(gss_init_flag, InitGSSAPI);
+	if (!gss_funcs.lib_handle) {
+		return "";
+	}
+#ifdef __APPLE__
+	// Try the known path
+	const char *paths[] = {"/System/Library/Frameworks/GSS.framework/GSS", nullptr};
+	for (int i = 0; paths[i]; i++) {
+		void *test = dlopen(paths[i], RTLD_LAZY | RTLD_NOLOAD);
+		if (test) {
+			dlclose(test);
+			return paths[i];
+		}
+	}
+	return "GSS.framework";
+#else
+	// Use dladdr to find the loaded library path
+	Dl_info info;
+	if (gss_funcs.import_name && dladdr((void *)gss_funcs.import_name, &info) && info.dli_fname) {
+		return info.dli_fname;
+	}
+	return "libgssapi_krb5.so";
+#endif
+}
+
 bool NegotiateAuthIsAvailable() {
 	std::call_once(gss_init_flag, InitGSSAPI);
 	return gss_available;
 }
 
-std::string GenerateNegotiateToken(const std::string &url) {
+std::string GetSecurityLibraryName() {
+	return GetLoadedLibraryPath();
+}
+
+std::string GetProviderName() {
+	std::call_once(gss_init_flag, InitGSSAPI);
+	if (!gss_available) {
+		return "unavailable";
+	}
+#ifdef __APPLE__
+	return "GSS-API (GSS.framework)";
+#else
+	return "GSS-API";
+#endif
+}
+
+NegotiateResult GenerateNegotiateToken(const std::string &url) {
 	std::call_once(gss_init_flag, InitGSSAPI);
 
 	if (!gss_available) {
@@ -361,7 +418,14 @@ std::string GenerateNegotiateToken(const std::string &url) {
 		gss_funcs.delete_sec_context(&min_ignore, &ctx, GSS_C_NO_BUFFER);
 	}
 
-	return token_b64;
+	NegotiateResult result;
+	result.token = token_b64;
+	result.url = url;
+	result.hostname = hostname;
+	result.spn = spn;
+	result.provider = GetProviderName();
+	result.library = GetLoadedLibraryPath();
+	return result;
 }
 
 #endif // _WIN32
