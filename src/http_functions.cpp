@@ -72,14 +72,14 @@ static std::vector<std::pair<std::string, std::string>> ExtractMapParam(duckdb_v
 
 //! Read the http_config variable by opening a temporary connection.
 //! Uses the chunk-based API (stable) rather than deprecated row-based accessors.
-static std::vector<std::pair<std::string, std::string>> ReadHttpConfigVariable() {
+static std::vector<std::pair<std::string, std::string>> ReadHttpConfigVariable(duckdb_database db) {
 	std::vector<std::pair<std::string, std::string>> entries;
-	if (!g_database) {
+	if (!db) {
 		return entries;
 	}
 
 	duckdb_connection conn;
-	if (duckdb_connect(g_database, &conn) == DuckDBError) {
+	if (duckdb_connect(db, &conn) == DuckDBError) {
 		return entries;
 	}
 
@@ -143,6 +143,19 @@ static std::string HeadersToJson(const cpr::Header &headers) {
 }
 
 // ---------------------------------------------------------------------------
+// Extra info: stashed at registration time, available in all callbacks
+// ---------------------------------------------------------------------------
+
+struct HttpExtraInfo {
+	duckdb_database database;
+	std::string method;
+};
+
+static void DestroyExtraInfo(void *data) {
+	delete static_cast<HttpExtraInfo *>(data);
+}
+
+// ---------------------------------------------------------------------------
 // Bind data: holds parsed parameters for one table function invocation
 // ---------------------------------------------------------------------------
 
@@ -191,11 +204,17 @@ struct HttpResult {
 	int redirect_count = 0;
 };
 
-static HttpResult ExecuteRequest(const HttpBindData &bind_data) {
-	// Resolve config — variable reading is currently disabled because variables
-	// are per-connection and we can't access the caller's connection from here.
-	// Config comes from hard-coded defaults + per-call overrides for now.
+static HttpResult ExecuteRequest(const HttpBindData &bind_data, duckdb_database db) {
+	// Resolve config — try reading from http_config variable, fall back to defaults
 	HttpConfig config;
+	if (db) {
+		try {
+			auto config_entries = ReadHttpConfigVariable(db);
+			config = ResolveConfig(bind_data.url, config_entries);
+		} catch (...) {
+			// Config reading failed — use defaults
+		}
+	}
 
 	// Apply per-call timeout override
 	int timeout = (bind_data.timeout_override >= 0) ? bind_data.timeout_override : config.timeout;
@@ -327,9 +346,9 @@ static HttpResult ExecuteRequest(const HttpBindData &bind_data) {
 //! Shared bind for all HTTP methods. Method is stored in extra_info.
 static void HttpBind(duckdb_bind_info info) {
 	auto *bind_data = new HttpBindData();
-	// Get the method from extra_info
-	auto *method = static_cast<const char *>(duckdb_bind_get_extra_info(info));
-	bind_data->method = method;
+	// Get the method and database from extra_info
+	auto *extra = static_cast<HttpExtraInfo *>(duckdb_bind_get_extra_info(info));
+	bind_data->method = extra->method;
 
 	// First positional parameter is always the URL
 	duckdb_value url_val = duckdb_bind_get_parameter(info, 0);
@@ -347,7 +366,7 @@ static void HttpBind(duckdb_bind_info info) {
 	}
 
 	// For http_do, the first param is method, second is URL
-	if (std::string(method) == "DO") {
+	if (extra->method == "DO") {
 		bind_data->method = bind_data->url; // first param was actually the method
 		// Convert to uppercase
 		for (auto &c : bind_data->method) {
@@ -447,9 +466,11 @@ static void HttpExecute(duckdb_function_info info, duckdb_data_chunk output) {
 		return;
 	}
 
+	auto *extra = static_cast<HttpExtraInfo *>(duckdb_function_get_extra_info(info));
+
 	HttpResult result;
 	try {
-		result = ExecuteRequest(*bind_data);
+		result = ExecuteRequest(*bind_data, extra ? extra->database : nullptr);
 	} catch (const std::exception &e) {
 		duckdb_function_set_error(info, e.what());
 		return;
@@ -525,8 +546,11 @@ static void RegisterHttpMethod(duckdb_connection connection, const char *name, c
 	duckdb_destroy_logical_type(&int_type);
 	duckdb_destroy_logical_type(&map_type);
 
-	// Store the method name as extra_info (static string, no cleanup needed)
-	duckdb_table_function_set_extra_info(function, (void *)method, nullptr);
+	// Store method name + database handle in extra_info
+	auto *extra = new HttpExtraInfo();
+	extra->method = method;
+	extra->database = g_database;
+	duckdb_table_function_set_extra_info(function, extra, DestroyExtraInfo);
 
 	duckdb_table_function_set_bind(function, HttpBind);
 	duckdb_table_function_set_init(function, HttpInit);
@@ -616,7 +640,7 @@ static void HttpRequestScalarFunc(duckdb_function_info info, duckdb_data_chunk i
 
 		HttpResult result;
 		try {
-			result = ExecuteRequest(bind_data);
+			result = ExecuteRequest(bind_data, g_database);
 		} catch (const std::exception &e) {
 			duckdb_scalar_function_set_error(info, e.what());
 			return;
