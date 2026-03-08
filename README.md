@@ -31,6 +31,15 @@ directly) — no build-time Kerberos dependencies required.
 make
 ```
 
+## Note on authorship
+
+The code and documentation in this repository were generated entirely by
+Claude Opus 4.6 (Anthropic), under close human supervision. The project is a
+vehicle for experimentation with designs, implementation techniques, and the
+boundaries of AI-assisted software development — not a production-ready
+artifact. Architectural decisions, API shape, and overall direction were
+guided by the human; implementation was performed by the model.
+
 ## License
 
 MIT
