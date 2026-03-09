@@ -7,5 +7,5 @@ dependencies = [
     "duckdb>=1.4.3",
     "flask>=3.0",
     "pytest>=8.0",
-    "duckdb-sqllogictest @ git+https://github.com/duckdb/duckdb-sqllogictest-python@0a936de0669a6ab7c78c8d1fbd4f57b251bfaa55",
+    "duckdb-sqllogictest @ git+https://github.com/duckdb/duckdb-sqllogictest-python@c68c2176af9550262a50e53ce7a6b7ade1d03c32",
 ]
