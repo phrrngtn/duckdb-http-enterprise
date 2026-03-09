@@ -14,7 +14,7 @@ Usage:
     curl -k --negotiate -u : https://localhost:8443/data.csv
 
     # Test with DuckDB:
-    duckdb -unsigned -cmd "LOAD 'build/release/http_client.duckdb_extension';" -c "
+    duckdb -unsigned -cmd "LOAD 'build/release/http_enterprise.duckdb_extension';" -c "
         SELECT * FROM http_get('https://localhost:8443/data.json',
             headers := MAP {'Authorization': negotiate_auth_header('https://localhost:8443/data.json')});
     "

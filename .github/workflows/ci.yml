@@ -32,7 +32,7 @@ jobs:
         run: |
           uv run python -m duckdb_sqllogictest \
             --test-dir test/sql \
-            --external-extension build/release/http_client.duckdb_extension \
+            --external-extension build/release/http_enterprise.duckdb_extension \
             --file-path test/sql/http_client_local.test
 
       - name: Start local test server
@@ -47,7 +47,7 @@ jobs:
         run: |
           uv run python -m duckdb_sqllogictest \
             --test-dir test/sql \
-            --external-extension build/release/http_client.duckdb_extension \
+            --external-extension build/release/http_enterprise.duckdb_extension \
             --file-path test/sql/http_client_server.test
 
       - name: Run pytest (parallel execution verification)
@@ -67,5 +67,5 @@ jobs:
       - name: Upload extension artifact
         uses: actions/upload-artifact@v4
         with:
-          name: http_client-${{ runner.os }}
-          path: build/release/http_client.duckdb_extension
+          name: http_enterprise-${{ runner.os }}
+          path: build/release/http_enterprise.duckdb_extension

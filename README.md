@@ -12,13 +12,13 @@ rather than as a transparent filesystem layer.
 ## Loading
 
 ```sql
-LOAD 'path/to/http_client.duckdb_extension';
+LOAD 'path/to/http_enterprise.duckdb_extension';
 ```
 
 Or, if loading an unsigned extension:
 
 ```bash
-duckdb -unsigned -cmd "LOAD 'build/release/http_client.duckdb_extension';"
+duckdb -unsigned -cmd "LOAD 'build/release/http_enterprise.duckdb_extension';"
 ```
 
 ## HTTP Functions
@@ -599,7 +599,7 @@ Endpoints:
 # Terminal 2: reset and run 10 requests with 0.3s delay each
 curl -s http://localhost:8444/reset > /dev/null
 
-duckdb -unsigned -cmd "LOAD 'build/release/http_client.duckdb_extension';" -c "
+duckdb -unsigned -cmd "LOAD 'build/release/http_enterprise.duckdb_extension';" -c "
 SELECT id,
        json_extract(http_request('GET',
            'http://localhost:8444/slow/' || id::VARCHAR || '?delay=0.3',
@@ -620,7 +620,7 @@ reports `peak_concurrent_connections: 10`.
 ```bash
 curl -s http://localhost:8444/reset > /dev/null
 
-duckdb -unsigned -cmd "LOAD 'build/release/http_client.duckdb_extension';" -c "
+duckdb -unsigned -cmd "LOAD 'build/release/http_enterprise.duckdb_extension';" -c "
 SET VARIABLE http_config = MAP {
     'default': '{\"max_concurrent\": 3, \"rate_limit\": \"100/s\"}'
 };
@@ -666,7 +666,7 @@ print(f'Batches: {len(batches)} (sizes: {[len(b) for b in batches]})')
 #### Verify rate limiter diagnostics after testing
 
 ```bash
-duckdb -unsigned -cmd "LOAD 'build/release/http_client.duckdb_extension';" -c "
+duckdb -unsigned -cmd "LOAD 'build/release/http_enterprise.duckdb_extension';" -c "
 -- Run some requests first
 SELECT count(*) FROM (
     SELECT http_request('GET', 'http://localhost:8444/fast', NULL, NULL, NULL)
@@ -690,7 +690,7 @@ A test server is included for end-to-end Negotiate authentication testing:
 python3 test/flask_negotiate_server.py
 
 # In another terminal
-duckdb -unsigned -cmd "LOAD 'build/release/http_client.duckdb_extension';" -c "
+duckdb -unsigned -cmd "LOAD 'build/release/http_enterprise.duckdb_extension';" -c "
     -- Health check (no auth required)
     SELECT r.response_status_code
     FROM (SELECT http_get('https://localhost:8443/health') AS r);

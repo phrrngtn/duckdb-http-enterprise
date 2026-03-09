@@ -14,7 +14,7 @@ import urllib.request
 import duckdb
 import pytest
 
-EXTENSION_PATH = "build/release/http_client.duckdb_extension"
+EXTENSION_PATH = "build/release/http_enterprise.duckdb_extension"
 SERVER = "http://localhost:8444"
 
 

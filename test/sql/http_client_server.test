@@ -1,10 +1,10 @@
 # name: test/sql/http_client_server.test
 # description: Test http_client extension against local Flask server (localhost:8444)
-# group: [http_client]
+# group: [http_enterprise]
 #
 # Requires: python test/flask_concurrency_server.py running on localhost:8444
 
-require http_client
+require http_enterprise
 
 # ---------------------------------------------------------------------------
 # http_get: basic GET

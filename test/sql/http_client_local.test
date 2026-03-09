@@ -1,8 +1,8 @@
 # name: test/sql/http_client_local.test
 # description: Test http_client extension (no external services)
-# group: [http_client]
+# group: [http_enterprise]
 
-require http_client
+require http_enterprise
 
 # ---------------------------------------------------------------------------
 # negotiate_auth_header: error cases (no network needed)

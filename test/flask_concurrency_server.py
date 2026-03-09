@@ -10,7 +10,7 @@ Usage:
     python3 test/flask_concurrency_server.py
 
     # Then from DuckDB:
-    duckdb -unsigned -cmd "LOAD 'build/release/http_client.duckdb_extension';" -c "
+    duckdb -unsigned -cmd "LOAD 'build/release/http_enterprise.duckdb_extension';" -c "
         SELECT id, json_extract(http_request('GET',
             'http://localhost:8444/slow/' || id::VARCHAR,
             NULL, NULL, NULL), '$.response_status_code')::INTEGER AS status

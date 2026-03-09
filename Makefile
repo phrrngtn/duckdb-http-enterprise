@@ -3,13 +3,13 @@
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 # Main extension configuration
-EXTENSION_NAME=http_client
+EXTENSION_NAME=http_enterprise
 
 # Set to 1 to enable Unstable API (binaries will only work on TARGET_DUCKDB_VERSION, forwards compatibility will be broken)
 USE_UNSTABLE_C_API=0
 
 # The DuckDB version to target
-TARGET_DUCKDB_VERSION=v1.2.0
+TARGET_DUCKDB_VERSION=v1.4.3
 
 # Use uv instead of configure/venv for all Python invocations
 PYTHON_VENV_BIN=uv run python

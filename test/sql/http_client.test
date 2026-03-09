@@ -1,8 +1,8 @@
 # name: test/sql/http_client.test
 # description: Test http_client extension
-# group: [http_client]
+# group: [http_enterprise]
 
-require http_client
+require http_enterprise
 
 # ---------------------------------------------------------------------------
 # negotiate_auth_header: error cases
