@@ -1,13 +1,41 @@
-# duckdb-http-client
+# duckdb-http-enterprise
 
-A DuckDB extension providing HTTP client functions as composable SQL primitives.
-Built on the [DuckDB C Extension API](https://github.com/duckdb/extension-template-c)
+A DuckDB extension providing HTTP client functions as composable SQL primitives
+with enterprise features: SPNEGO/Kerberos authentication, mutual TLS, scoped
+configuration, GCRA rate limiting, and parallel execution via libcurl's multi
+interface. Built on the [DuckDB C Extension API](https://github.com/duckdb/extension-template-c)
 for binary compatibility across DuckDB versions.
 
 Inspired by Alex Garcia's excellent [sqlite-http](https://github.com/asg017/sqlite-http)
 (`http0`) extension for SQLite, which demonstrated how natural and powerful
 HTTP-in-SQL can be when done as explicit table-valued and scalar functions
 rather than as a transparent filesystem layer.
+
+### Relation to the community `http_client` extension
+
+The DuckDB community extensions repository includes
+[http_client](https://github.com/Query-farm/httpclient) by Query-farm, which
+provides basic `http_get`/`http_post`/`http_head` functions returning JSON.
+This extension (`http_enterprise`) is a separate, ground-up implementation
+targeting different use cases. Key differences:
+
+| | [http_client](https://github.com/Query-farm/httpclient) | http_enterprise |
+|---|---|---|
+| HTTP methods | GET, POST, HEAD | GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS + generic `http_request()` |
+| Return type | JSON (access via `->>`) | Native STRUCT (access via `.field`) |
+| Volatility | Not specified | Correct per-verb: GET/HEAD/OPTIONS idempotent; POST/PATCH volatile |
+| Rate limiting | None | GCRA per-host + global, 429 backoff, `http_rate_limit_stats()` diagnostics |
+| Parallel execution | None | libcurl multi interface, configurable `max_concurrent` |
+| Authentication | Manual headers | SPNEGO/Kerberos, Bearer with expiry checking, mutual TLS |
+| Configuration | Per-call only | Scoped config via `http_config` variable with URL prefix + domain-suffix matching |
+| SSL/TLS | Basic | Client certs (mTLS), custom CA bundles, `verify_ssl` toggle |
+| Proxy support | None | Configurable per-scope |
+| Extension API | C++ internal API | C Extension API (binary-compatible across DuckDB versions) |
+
+**Important:** The two extensions share function names (`http_get`, `http_post`,
+etc.) but have different signatures and return types. They cannot be loaded
+simultaneously, and SQL written for one will not work with the other without
+modification.
 
 ## Loading
 
@@ -567,7 +595,7 @@ DuckDB to load it.
 make test_release
 ```
 
-The sqllogictest suite (`test/sql/http_client.test`) covers error cases for
+The sqllogictest suite (`test/sql/`) covers error cases for
 Negotiate auth, table functions against httpbin.org, and scalar function usage
 including data-driven queries.
 
