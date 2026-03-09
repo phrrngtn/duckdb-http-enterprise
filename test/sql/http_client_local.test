@@ -126,35 +126,35 @@ tok123
 # Set config for a base domain
 statement ok
 SET VARIABLE http_config = http_config_set(
-    'https://deshaw.com',
+    'https://acmecorp.test',
     json_object('auth_type', 'negotiate')
 );
 
 # An expired bearer on a subdomain proves the domain-suffix match resolved the config
 statement ok
 SET VARIABLE http_config = http_config_set(
-    'https://deshaw.com',
+    'https://acmecorp.test',
     json_object('auth_type', 'bearer', 'bearer_token', 'tok', 'bearer_token_expires_at', 1)
 );
 
 statement error
 SELECT r.response_status_code
-FROM (SELECT http_get('https://sub.deshaw.com/path') AS r);
+FROM (SELECT http_get('https://sub.acmecorp.test/path') AS r);
 ----
-Bearer token for sub.deshaw.com expired at
+Bearer token for sub.acmecorp.test expired at
 
 # Prefix match takes priority over domain-suffix match
 statement ok
 SET VARIABLE http_config = http_config_set(
-    'https://sub.deshaw.com/',
+    'https://sub.acmecorp.test/',
     json_object('auth_type', 'bearer', 'bearer_token', 'specific', 'bearer_token_expires_at', 2)
 );
 
 statement error
 SELECT r.response_status_code
-FROM (SELECT http_get('https://sub.deshaw.com/path') AS r);
+FROM (SELECT http_get('https://sub.acmecorp.test/path') AS r);
 ----
-Bearer token for sub.deshaw.com expired at
+Bearer token for sub.acmecorp.test expired at
 
 # Clean up before next section
 statement ok

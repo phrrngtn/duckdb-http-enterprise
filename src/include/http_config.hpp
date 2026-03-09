@@ -135,7 +135,7 @@ inline HttpConfig ResolveConfig(const std::string &url,
 			continue;
 		}
 		// Domain-suffix match: scope's host is a suffix of url's host
-		// (e.g. scope https://deshaw.com matches url https://sub.deshaw.com/path)
+		// (e.g. scope https://acmecorp.test matches url https://sub.acmecorp.test/path)
 		if (!best_is_prefix) {
 			auto scope_host = ExtractHostFromUrl(scope);
 			auto url_host = ExtractHostFromUrl(url);
