@@ -1,5 +1,13 @@
 # duckdb-http-enterprise
 
+> **Note on authorship:** The code and documentation in this repository were
+> generated entirely by Claude Opus 4.6 (Anthropic), under close human
+> supervision. This is a research project — a vehicle for experimentation with
+> designs, implementation techniques, and the boundaries of AI-assisted software
+> development, not a production-ready artifact. Architectural decisions, API
+> shape, and overall direction were guided by the human; implementation was
+> performed by the model.
+
 A DuckDB extension providing HTTP client functions as composable SQL primitives
 with enterprise features: SPNEGO/Kerberos authentication, mutual TLS, scoped
 configuration, GCRA rate limiting, and parallel execution via libcurl's multi
@@ -729,15 +737,6 @@ duckdb -unsigned -cmd "LOAD 'build/release/http_enterprise.duckdb_extension';" -
         headers := MAP {'Authorization': negotiate_auth_header('https://localhost:8443/data.json')}) AS r);
 "
 ```
-
-## Note on authorship
-
-The code and documentation in this repository were generated entirely by
-Claude Opus 4.6 (Anthropic), under close human supervision. The project is a
-vehicle for experimentation with designs, implementation techniques, and the
-boundaries of AI-assisted software development — not a production-ready
-artifact. Architectural decisions, API shape, and overall direction were
-guided by the human; implementation was performed by the model.
 
 ## License
 
